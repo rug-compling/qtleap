@@ -229,6 +229,10 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 
+	id5 := md5.New()
+	id5.Write([]byte(fmt.Sprint(req)))
+	id := fmt.Sprintf("%x", id5.Sum(nil))
+
 	if req.SourceLang == "en" && req.TargetLang == "nl" {
 		req.Tokenized = tokEN(req.Text)
 	} else {
@@ -250,7 +254,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		req.NBestSize = 10
 	}
 
-	resp, id, err := doMoses(req)
+	resp, err := doMoses(req)
 	if err != nil {
 		rerror(w, 8, err.Error())
 		return
@@ -464,7 +468,7 @@ func untok(s, lang string) string {
 	return doCmd("echo %s | %s | %s -l en", quote(s), DETRUECASER, DETOKENIZER)
 }
 
-func doMoses(r *Request) ([]byte, string, error) {
+func doMoses(r *Request) ([]byte, error) {
 	port := "9071"
 	if r.SourceLang == "nl" {
 		port = "9072"
@@ -512,19 +516,16 @@ func doMoses(r *Request) ([]byte, string, error) {
 </methodCall>
 `)
 
-	id := md5.New()
-	id.Write(buf.Bytes())
-
 	resp, err := http.Post("http://127.0.0.1:"+port+"/RPC2", "text/xml", &buf)
 
 	if err != nil {
-		return []byte{}, "", err
+		return []byte{}, err
 	}
 
 	b, _ := ioutil.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	return b, fmt.Sprintf("%x", id.Sum(nil)), nil
+	return b, nil
 }
 
 ////////////////////////////////////////////////////////////////
