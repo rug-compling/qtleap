@@ -305,11 +305,6 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Requests: %d - Wait: %v - Process: %v\n", len(chQueue), time1, time2)
 }
 
-func getFault(fault ValueT) *Json {
-	js := &Json{}
-	return js
-}
-
 func decodeUni(resp *MethodResponseT, srctok string, dodetok bool, tgtlang, id string) *Json {
 
 	repl := &Json{
