@@ -99,7 +99,8 @@ type TranslationT struct {
 
 type TranslatedT struct {
 	Text         string          `json:"text,omitempty"`
-	Score        float64         `json:"score,omitempty"`
+	Warning      string          `json:"warning,omitempty"`
+	Score        float64         `json:"score"`
 	Rank         int             `json:"rank"`
 	TgtTokenized string          `json:"tgt-tokenized"`
 	SrcTokenized string          `json:"src-tokenized"`
@@ -282,12 +283,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var js *Json
-	if req.NBestSize == 1 {
-		js = decodeUni(mt, req.Tokenized, req.Detokenize, req.TargetLang, id)
-	} else {
-		js = decodeMulti(mt, req.Tokenized, req.Detokenize, req.TargetLang, id)
-	}
+	js := decodeMulti(mt, req.Tokenized, req.Detokenize, req.TargetLang, id)
 
 	if req.AlignmentInfo {
 		for _, t := range js.Translation {
@@ -308,66 +304,9 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	b, _ := json.MarshalIndent(js, "", "  ")
 	s := string(b)
 
-	if req.NBestSize < 2 {
-		s = strings.Replace(s, "\n"+`          "rank": 0,`, "", 1)
-	}
-
 	fmt.Fprintf(w, s+"\n")
 
 	log.Printf("Requests: %d - Wait: %v - Work: %v", len(chQueue), time1, time2)
-}
-
-func decodeUni(resp *MethodResponseT, srctok string, dodetok bool, tgtlang, id string) *Json {
-
-	repl := &Json{
-		Translation:  make([]TranslationT, 1),
-		ErrorMessage: "OK",
-	}
-	repl.Translation[0].Translated = make([]TranslatedT, 1)
-	repl.Translation[0].TranslationId = id
-
-	tr := TranslatedT{
-		SrcTokenized: strings.TrimSpace(srctok),
-	}
-	for _, member := range resp.Params.Param.Value.Struct.Member {
-		switch member.Name {
-		case "align":
-			tr.AlignmentRaw = make([]AlignmentRawT, 0)
-			for _, v := range member.Value.Array.Data.Value {
-				a := AlignmentRawT{
-					SrcStart: -1,
-					SrcEnd:   -1,
-					TgtStart: -1,
-					TgtEnd:   -1,
-				}
-				for _, member := range v.Struct.Member {
-					value := member.Value.I4
-					switch member.Name {
-					case "src-end":
-						a.SrcEnd = value
-					case "src-start":
-						a.SrcStart = value
-					case "tgt-start":
-						a.TgtStart = value
-					}
-				}
-				tr.AlignmentRaw = append(tr.AlignmentRaw, a)
-			}
-		case "text":
-			tr.TgtTokenized = strings.TrimSpace(member.Value.String)
-			if dodetok {
-				var err error
-				tr.Text, err = untok(tr.TgtTokenized, tgtlang)
-				if err != nil {
-					log.Print(err)
-					tr.Text = "ERROR: " + err.Error()
-				}
-			}
-		}
-	}
-	repl.Translation[0].Translated[0] = tr
-
-	return repl
 }
 
 func decodeMulti(resp *MethodResponseT, srctok string, dodetok bool, tgtlang, id string) *Json {
@@ -418,11 +357,15 @@ func decodeMulti(resp *MethodResponseT, srctok string, dodetok bool, tgtlang, id
 			case "hyp":
 				tr.TgtTokenized = strings.TrimSpace(member.Value.String)
 				if dodetok {
+					if tgtlang == "nl" {
+						tr.Warning = "No rules to detokenize for Dutch available, using rules for English instead"
+					}
 					var err error
 					tr.Text, err = untok(tr.TgtTokenized, tgtlang)
 					if err != nil {
 						log.Print(err)
 						tr.Text = "ERROR: " + err.Error()
+						tr.Warning = "Detokenize failed: " + err.Error()
 					}
 				}
 			case "totalScore":
@@ -523,9 +466,8 @@ func doMoses(r *Request) ([]byte, error) {
           </member>
 `)
 	}
-	if r.NBestSize > 1 {
-		fmt.Fprintf(&buf,
-			`          <member>
+	fmt.Fprintf(&buf,
+		`          <member>
             <name>nbest</name>
             <value><i4>%d</i4></value>
           </member>
@@ -533,15 +475,12 @@ func doMoses(r *Request) ([]byte, error) {
             <name>nbest-distinct</name>
             <value><boolean>1</boolean></value>
           </member>
-`, r.NBestSize)
-	}
-	fmt.Fprint(&buf,
-		`        </struct>
+        </struct>
       </value>
     </param>
   </params>
 </methodCall>
-`)
+`, r.NBestSize)
 
 	resp, err := http.Post("http://127.0.0.1:"+port+"/RPC2", "text/xml", &buf)
 
