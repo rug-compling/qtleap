@@ -142,8 +142,8 @@ func main() {
 	http.HandleFunc("/favicon.ico", favicon)
 	http.HandleFunc("/robots.txt", robots)
 
-	log.Println("Server starting")
-	log.Println(http.ListenAndServe(":9070", nil))
+	log.Print("Server starting")
+	log.Print(http.ListenAndServe(":9070", nil))
 }
 
 func handle(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +157,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 
 	start1 := time.Now()
 
-	log.Printf("[%s] %s %s %s", r.Header.Get("X-Forwarded-For"), r.RemoteAddr, r.Method, r.URL)
+	log.Printf("[%s] %s %s", r.Header.Get("X-Forwarded-For"), r.RemoteAddr, r.Method)
 
 	var chClose <-chan bool
 	if f, ok := w.(http.CloseNotifier); ok {
@@ -224,7 +224,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-chClose:
-		log.Println("Request dropped")
+		log.Print("Request dropped")
 		return
 	default:
 	}
@@ -233,10 +233,16 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	id5.Write([]byte(fmt.Sprint(req)))
 	id := fmt.Sprintf("%x", id5.Sum(nil))
 
+	var err error
 	if req.SourceLang == "en" && req.TargetLang == "nl" {
-		req.Tokenized = tokEN(req.Text)
+		req.Tokenized, err = tokEN(req.Text)
 	} else {
-		req.Tokenized = tokNL(req.Text)
+		req.Tokenized, err = tokNL(req.Text)
+	}
+	if err != nil {
+		log.Print("tokenize: ", err)
+		rerror(w, 8, "tokenize: "+err.Error())
+		return
 	}
 	req.Tokenized = strings.Replace(req.Tokenized, "|", "_", 01)
 
@@ -256,7 +262,8 @@ func handle(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := doMoses(req)
 	if err != nil {
-		rerror(w, 8, err.Error())
+		log.Print("mosesserver: ", err)
+		rerror(w, 8, "mosesserver: "+err.Error())
 		return
 	}
 
@@ -270,7 +277,8 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				err = html.EscapeString(member.Value.String)
 			}
 		}
-		rerror(w, 8, "error: "+err)
+		log.Print("Fault: ", err)
+		rerror(w, 8, err)
 		return
 	}
 
@@ -306,7 +314,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(w, s+"\n")
 
-	log.Printf("Requests: %d - Wait: %v - Process: %v\n", len(chQueue), time1, time2)
+	log.Printf("Requests: %d - Wait: %v - Work: %v", len(chQueue), time1, time2)
 }
 
 func decodeUni(resp *MethodResponseT, srctok string, dodetok bool, tgtlang, id string) *Json {
@@ -348,7 +356,12 @@ func decodeUni(resp *MethodResponseT, srctok string, dodetok bool, tgtlang, id s
 		case "text":
 			tr.TgtTokenized = strings.TrimSpace(member.Value.String)
 			if dodetok {
-				tr.Text = untok(tr.TgtTokenized, tgtlang)
+				var err error
+				tr.Text, err = untok(tr.TgtTokenized, tgtlang)
+				if err != nil {
+					log.Print(err)
+					tr.Text = "ERROR: " + err.Error()
+				}
 			}
 		}
 	}
@@ -405,7 +418,12 @@ func decodeMulti(resp *MethodResponseT, srctok string, dodetok bool, tgtlang, id
 			case "hyp":
 				tr.TgtTokenized = strings.TrimSpace(member.Value.String)
 				if dodetok {
-					tr.Text = untok(tr.TgtTokenized, tgtlang)
+					var err error
+					tr.Text, err = untok(tr.TgtTokenized, tgtlang)
+					if err != nil {
+						log.Print(err)
+						tr.Text = "ERROR: " + err.Error()
+					}
 				}
 			case "totalScore":
 				tr.Score = member.Value.Double
@@ -436,7 +454,7 @@ func quote(s string) string {
 	return "'" + strings.Replace(s, "'", "'\\''", -1) + "'"
 }
 
-func doCmd(format string, a ...interface{}) string {
+func doCmd(format string, a ...interface{}) (string, error) {
 	cmd := exec.Command(SH, "-c", fmt.Sprintf(format, a...))
 	cmd.Env = []string{
 		"ALPINO_HOME=" + ALPINO,
@@ -445,25 +463,34 @@ func doCmd(format string, a ...interface{}) string {
 		"LANGUAGE=en_US.utf8",
 		"LC_ALL=en_US.utf8",
 	}
-	pipe, _ := cmd.StdoutPipe()
-	cmd.Start()
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	err = cmd.Start()
+	if err != nil {
+		return "", err
+	}
 	b, _ := ioutil.ReadAll(pipe)
 	pipe.Close()
-	cmd.Wait()
-	return strings.TrimSpace(string(b))
+	err = cmd.Wait()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
 }
 
-func tokNL(s string) string {
+func tokNL(s string) (string, error) {
 	s = strings.Join(strings.Fields(s), " ")
 	return doCmd("echo %s | $ALPINO_HOME/Tokenization/tokenize_no_breaks.sh | %s --model corpus/truecase-model.nl", quote(s), TRUECASER)
 }
 
-func tokEN(s string) string {
+func tokEN(s string) (string, error) {
 	s = strings.Join(strings.Fields(s), " ")
 	return doCmd("echo %s | %s -l en | %s --model corpus/truecase-model.en", quote(s), TOKENIZER, TRUECASER)
 }
 
-func untok(s, lang string) string {
+func untok(s, lang string) (string, error) {
 	// er is geen detokenizer voor Nederlands!
 	return doCmd("echo %s | %s | %s -l en", quote(s), DETRUECASER, DETOKENIZER)
 }
