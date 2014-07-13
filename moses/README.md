@@ -8,7 +8,7 @@ This is state of the art?
 Problems:
 
  - Alpino tokenizer changes square brackets into parentheses.
- - Moses can't handle vertical bar, so it it changed into underscore.
+ - Moses can't handle vertical bar, so it is changed into underscore.
  - The detruecaser won't handle Dutch words like `'s middags` and `ijzer`
    correctly.
  - There are no rules for detokenizing Dutch. Using the English rules
