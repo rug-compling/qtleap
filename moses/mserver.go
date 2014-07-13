@@ -99,7 +99,6 @@ type TranslationT struct {
 
 type TranslatedT struct {
 	Text         string          `json:"text,omitempty"`
-	Warning      string          `json:"warning,omitempty"`
 	Score        float64         `json:"score"`
 	Rank         int             `json:"rank"`
 	TgtTokenized string          `json:"tgt-tokenized"`
@@ -357,15 +356,11 @@ func decodeMulti(resp *MethodResponseT, srctok string, dodetok bool, tgtlang, id
 			case "hyp":
 				tr.TgtTokenized = strings.TrimSpace(member.Value.String)
 				if dodetok {
-					if tgtlang == "nl" {
-						tr.Warning = "No rules to detokenize for Dutch available, using rules for English instead"
-					}
 					var err error
 					tr.Text, err = untok(tr.TgtTokenized, tgtlang)
 					if err != nil {
 						log.Print(err)
 						tr.Text = "ERROR: " + err.Error()
-						tr.Warning = "Detokenize failed: " + err.Error()
 					}
 				}
 			case "totalScore":
