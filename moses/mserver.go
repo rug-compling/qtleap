@@ -101,8 +101,8 @@ type TranslatedT struct {
 	Text         string          `json:"text,omitempty"`
 	Score        float64         `json:"score"`
 	Rank         int             `json:"rank"`
-	TgtTokenized string          `json:"tgt-tokenized"`
-	SrcTokenized string          `json:"src-tokenized"`
+	TgtTokenized string          `json:"tgt-tokenized,omitempty"`
+	SrcTokenized string          `json:"src-tokenized,omitempty"`
 	AlignmentRaw []AlignmentRawT `json:"alignment-raw,omitempty"`
 }
 
@@ -282,7 +282,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	js := decodeMulti(mt, req.Tokenized, req.Detokenize, req.TargetLang, id)
+	js := decodeMulti(mt, req.Tokenized, req.Detokenize, req.AlignmentInfo, req.TargetLang, id)
 
 	if req.AlignmentInfo {
 		for _, t := range js.Translation {
@@ -308,7 +308,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Requests: %d - Wait: %v - Work: %v", len(chQueue), time1, time2)
 }
 
-func decodeMulti(resp *MethodResponseT, srctok string, dodetok bool, tgtlang, id string) *Json {
+func decodeMulti(resp *MethodResponseT, srctok string, dodetok, doalign bool, tgtlang, id string) *Json {
 
 	repl := &Json{
 		Translation:  make([]TranslationT, 1),
@@ -366,6 +366,13 @@ func decodeMulti(resp *MethodResponseT, srctok string, dodetok bool, tgtlang, id
 			case "totalScore":
 				tr.Score = member.Value.Double
 			}
+		}
+		if !dodetok {
+			tr.Text = tr.TgtTokenized
+		}
+		if !doalign {
+			tr.TgtTokenized = ""
+			tr.SrcTokenized = ""
 		}
 		repl.Translation[0].Translated = append(repl.Translation[0].Translated, tr)
 	}
