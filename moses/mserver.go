@@ -9,8 +9,9 @@
 package main
 
 import (
+	"github.com/pebbe/tokenize"
+
 	"bytes"
-	"crypto/md5"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
@@ -20,6 +21,7 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -29,13 +31,19 @@ import (
 const (
 	SH          = "/bin/sh"
 	PATH        = "/net/aistaff/kleiweg/paqu/bin:/bin:/usr/bin:/net/aps/64/bin"
-	ALPINO      = "/net/aps/64/src/Alpino"
 	TRUECASER   = "/net/aps/64/opt/moses/mosesdecoder/scripts/recaser/truecase.perl"
 	DETRUECASER = "/net/aps/64/opt/moses/mosesdecoder/scripts/recaser/detruecase.perl"
 	TOKENIZER   = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/tokenizer.perl"
 	DETOKENIZER = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/detokenizer.perl"
 	POOLSIZE    = 12   // gelijk aan aantal threads in elk van de twee mosesservers
 	QUEUESIZE   = 1000 // inclusief request die nu verwerkt worden
+)
+
+var (
+	rePar      = regexp.MustCompile("\n\\s*\n")
+	rePunct    = regexp.MustCompile(`^[.!?]+$`)
+	reEndPoint = regexp.MustCompile(`\pL\pL\pP*[.!?]\s*$`)
+	reMidPoint = regexp.MustCompile(`\p{Ll}\p{Ll}\pP*[.!?]\s+\p{Lu}`)
 )
 
 ////////////////////////////////////////////////////////////////
@@ -84,6 +92,14 @@ type DataT struct {
 
 ////////////////////////////////////////////////////////////////
 
+type ResponseT struct {
+	mt  *MethodResponseT
+	tok string
+	err string
+}
+
+////////////////////////////////////////////////////////////////
+
 type Json struct {
 	ErrorCode    int            `json:"errorCode"`
 	ErrorMessage string         `json:"errorMessage"`
@@ -93,8 +109,9 @@ type Json struct {
 }
 
 type TranslationT struct {
-	Translated    []TranslatedT `json:"translated"`
-	TranslationId string        `json:"translationId"`
+	ErrorCode    int           `json:"errorCode"`
+	ErrorMessage string        `json:"errorMessage"`
+	Translated   []TranslatedT `json:"translated,omitempty"`
 }
 
 type TranslatedT struct {
@@ -123,7 +140,14 @@ type Request struct {
 	NBestSize     int    `json:"nBestSize"`
 	Detokenize    bool   `json:"detokenize"`
 	Text          string `json:"text"`
-	Tokenized     string
+}
+
+////////////////////////////////////////////////////////////////
+
+type Result struct {
+	resp   []byte
+	err    error
+	srcTok string
 }
 
 ////////////////////////////////////////////////////////////////
@@ -143,7 +167,7 @@ func main() {
 	http.HandleFunc("/robots.txt", robots)
 
 	log.Print("Server starting")
-	log.Print(http.ListenAndServe(":9070", nil))
+	log.Print("Server exit: ", http.ListenAndServe(":9070", nil))
 }
 
 func handle(w http.ResponseWriter, r *http.Request) {
@@ -191,7 +215,11 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	case "POST":
 		b, _ := ioutil.ReadAll(r.Body)
 		r.Body.Close()
-		json.Unmarshal(b, req)
+		err := json.Unmarshal(b, req)
+		if err != nil {
+			rerror(w, 5, "Parse error: "+err.Error())
+			return
+		}
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -229,29 +257,58 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 
-	id5 := md5.New()
-	id5.Write([]byte(fmt.Sprint(req)))
-	id := fmt.Sprintf("%x", id5.Sum(nil))
-
-	var err error
-	if req.SourceLang == "en" && req.TargetLang == "nl" {
-		req.Tokenized, err = tokEN(req.Text)
-	} else {
-		req.Tokenized, err = tokNL(req.Text)
-	}
-	if err != nil {
-		log.Print("tokenize: ", err)
-		rerror(w, 8, "tokenize: "+err.Error())
-		return
-	}
-	req.Tokenized = strings.Replace(req.Tokenized, "|", "_", 01)
-
-	if n := len(strings.Fields(req.Tokenized)); n > 100 {
-		rerror(w, 5, "Text has more than 100 words (after tokenisation)")
-		return
-	} else if n == 0 {
-		rerror(w, 5, "Missing text")
-		return
+	parts := strings.Split(rePar.ReplaceAllLiteralString("\n\n", strings.TrimSpace(req.Text)), "\n\n")
+	lines := make([]string, 0)
+	for _, part := range parts {
+		run := isRun(strings.Split(part, "\n"))
+		if run {
+			part = strings.Replace(part, "\n", " ", -1)
+		}
+		if req.SourceLang == "nl" {
+			tok, err := tokenize.Dutch(part, run)
+			if err != nil {
+				rerror(w, 8, "Tokenizer: "+err.Error())
+				return
+			}
+			ss, err := doCmd("echo %s | %s --model corpus/truecase-model.nl", quote(strings.TrimSpace(tok)), TRUECASER)
+			if err != nil {
+				rerror(w, 8, "Truecaser: "+err.Error())
+				return
+			}
+			for _, s := range strings.Split(ss, "\n") {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					lines = append(lines, s)
+				}
+			}
+		} else {
+			var ss string
+			if run {
+				s1, err := doCmd("echo %s | %s -l en", quote(part), TOKENIZER)
+				if err != nil {
+					rerror(w, 8, "Tokenizer: "+err.Error())
+					return
+				}
+				ss, err = doCmd("echo %s | %s --model corpus/truecase-model.en", quote(splitlines(part, s1)), TRUECASER)
+				if err != nil {
+					rerror(w, 8, "Truecaser: "+err.Error())
+					return
+				}
+			} else {
+				var err error
+				ss, err = doCmd("echo %s | %s -l en | %s --model corpus/truecase-model.en", quote(part), TOKENIZER, TRUECASER)
+				if err != nil {
+					rerror(w, 8, "Tokenizer or Truecaser: "+err.Error())
+					return
+				}
+			}
+			for _, s := range strings.Split(ss, "\n") {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					lines = append(lines, s)
+				}
+			}
+		}
 	}
 
 	if req.NBestSize < 1 {
@@ -260,29 +317,38 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		req.NBestSize = 10
 	}
 
-	resp, err := doMoses(req)
-	if err != nil {
-		log.Print("mosesserver: ", err)
-		rerror(w, 8, "mosesserver: "+err.Error())
-		return
-	}
-
-	mt := &MethodResponseT{}
-	xml.Unmarshal(resp, mt)
-
-	if len(mt.Fault) > 0 {
-		err := "unknown"
-		for _, member := range mt.Fault[0].Value.Struct.Member {
-			if member.Name == "faultString" {
-				err = html.EscapeString(member.Value.String)
+	responses := make([]*ResponseT, 0)
+	for _, line := range lines {
+		rs := &ResponseT{
+			mt:  &MethodResponseT{},
+			tok: line,
+		}
+		if n := len(strings.Fields(line)); n > 100 {
+			rs.err = "Line has more than 100 words (after tokenisation)"
+		} else if n == 0 {
+			rs.err = "Missing text"
+		} else {
+			line = strings.Replace(line, "|", "_", -1)
+			resp, err := doMoses(req.SourceLang, line, req.AlignmentInfo, req.NBestSize)
+			if err != nil {
+				log.Print("Moses: ", err)
+				rs.err = err.Error()
+			} else {
+				xml.Unmarshal(resp, rs.mt)
+				if len(rs.mt.Fault) > 0 {
+					rs.err = "unknown"
+					for _, member := range rs.mt.Fault[0].Value.Struct.Member {
+						if member.Name == "faultString" {
+							rs.err = html.EscapeString(member.Value.String)
+						}
+					}
+				}
 			}
 		}
-		log.Print("Fault: ", err)
-		rerror(w, 8, err)
-		return
+		responses = append(responses, rs)
 	}
 
-	js := decodeMulti(mt, req.Tokenized, req.Detokenize, req.AlignmentInfo, req.TargetLang, id)
+	js := decodeMulti(responses, req.Detokenize, req.AlignmentInfo, req.TargetLang)
 
 	if req.AlignmentInfo {
 		for _, t := range js.Translation {
@@ -305,78 +371,128 @@ func handle(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(w, s+"\n")
 
-	log.Printf("Requests: %d - Wait: %v - Work: %v", len(chQueue), time1, time2)
+	log.Printf("Requests: %d - Wait: %v - Work: %v - Lines: %d", len(chQueue), time1, time2, len(lines))
 }
 
-func decodeMulti(resp *MethodResponseT, srctok string, dodetok, doalign bool, tgtlang, id string) *Json {
+func splitlines(ori, tok string) string {
+	tt := strings.Fields(tok)
+	out := make([]string, len(tt))
+	for i, t := range tt {
+		ori = strings.TrimSpace(ori)
+		if len(ori) > len(t) && ori[len(t)] == ' ' && rePunct.MatchString(t) {
+			out[i] = t + "\n"
+		} else {
+			out[i] = t + " "
+		}
+		if n := len(html.UnescapeString(t)); len(ori) > n {
+			ori = ori[n:]
+		}
+	}
+	return strings.TrimSpace(strings.Join(out, ""))
+}
+
+func isRun(lines []string) bool {
+	ln := float64(len(lines))
+	midpoint := float64(0)
+	endpoint := float64(0)
+	for i, line := range lines {
+		if i < len(lines)-1 && reEndPoint.MatchString(line) {
+			endpoint += 1
+		}
+		midpoint += float64(len(reMidPoint.FindAllString(line, -1)))
+	}
+	if endpoint > (ln-1)*.7 {
+		return false
+	}
+	if midpoint > ln*.3 {
+		return true
+	}
+	return false
+}
+
+func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) *Json {
 
 	repl := &Json{
-		Translation:  make([]TranslationT, 1),
+		Translation:  make([]TranslationT, len(responses)),
+		ErrorCode:    0,
 		ErrorMessage: "OK",
 	}
-	repl.Translation[0].Translated = make([]TranslatedT, 0)
-	repl.Translation[0].TranslationId = id
 
-	var nbest []ValueT
-	for _, member := range resp.Params.Param.Value.Struct.Member {
-		if member.Name == "nbest" {
-			nbest = member.Value.Array.Data.Value
-		}
-	}
+	for idx, resp := range responses {
 
-	for i, translated := range nbest {
-		tr := TranslatedT{
-			SrcTokenized: strings.TrimSpace(srctok),
-			Rank:         i,
+		if resp.err != "" {
+			repl.Translation[idx].ErrorCode = 99
+			repl.Translation[idx].ErrorMessage = resp.err
+			repl.ErrorCode = 99
+			repl.ErrorMessage = "There were errors with some translations"
+			continue
 		}
-		for _, member := range translated.Struct.Member {
-			switch member.Name {
-			case "align":
-				tr.AlignmentRaw = make([]AlignmentRawT, 0)
-				for _, v := range member.Value.Array.Data.Value {
-					a := AlignmentRawT{
-						SrcStart: -1,
-						SrcEnd:   -1,
-						TgtStart: -1,
-						TgtEnd:   -1,
-					}
-					for _, member := range v.Struct.Member {
-						value := member.Value.I4
-						switch member.Name {
-						case "src-end":
-							a.SrcEnd = value
-						case "src-start":
-							a.SrcStart = value
-						case "tgt-start":
-							a.TgtStart = value
-						}
-					}
-					tr.AlignmentRaw = append(tr.AlignmentRaw, a)
-				}
-			case "hyp":
-				tr.TgtTokenized = strings.TrimSpace(member.Value.String)
-				if dodetok {
-					var err error
-					tr.Text, err = untok(tr.TgtTokenized, tgtlang)
-					if err != nil {
-						log.Print(err)
-						tr.Text = "ERROR: " + err.Error()
-					}
-				}
-			case "totalScore":
-				tr.Score = member.Value.Double
+
+		repl.Translation[idx].ErrorCode = 0
+		repl.Translation[idx].ErrorMessage = "OK"
+
+		repl.Translation[idx].Translated = make([]TranslatedT, 0)
+
+		var nbest []ValueT
+		for _, member := range resp.mt.Params.Param.Value.Struct.Member {
+			if member.Name == "nbest" {
+				nbest = member.Value.Array.Data.Value
 			}
 		}
-		if !dodetok {
-			tr.Text = tr.TgtTokenized
-		}
-		if !doalign {
-			tr.TgtTokenized = ""
-			tr.SrcTokenized = ""
-		}
-		repl.Translation[0].Translated = append(repl.Translation[0].Translated, tr)
-	}
 
+		for i, translated := range nbest {
+			tr := TranslatedT{
+				SrcTokenized: strings.TrimSpace(resp.tok),
+				Rank:         i,
+			}
+			for _, member := range translated.Struct.Member {
+				switch member.Name {
+				case "align":
+					tr.AlignmentRaw = make([]AlignmentRawT, 0)
+					for _, v := range member.Value.Array.Data.Value {
+						a := AlignmentRawT{
+							SrcStart: -1,
+							SrcEnd:   -1,
+							TgtStart: -1,
+							TgtEnd:   -1,
+						}
+						for _, member := range v.Struct.Member {
+							value := member.Value.I4
+							switch member.Name {
+							case "src-end":
+								a.SrcEnd = value
+							case "src-start":
+								a.SrcStart = value
+							case "tgt-start":
+								a.TgtStart = value
+							}
+						}
+						tr.AlignmentRaw = append(tr.AlignmentRaw, a)
+					}
+				case "hyp":
+					tr.TgtTokenized = strings.TrimSpace(member.Value.String)
+					if dodetok {
+						var err error
+						tr.Text, err = untok(tr.TgtTokenized, tgtlang)
+						if err != nil {
+							log.Print("Untokenize: ", err)
+							tr.Text = "ERROR: " + err.Error()
+						}
+					}
+				case "totalScore":
+					tr.Score = member.Value.Double
+				}
+			}
+			if !dodetok {
+				tr.Text = tr.TgtTokenized
+			}
+			if !doalign && len(responses) < 2 {
+				tr.TgtTokenized = ""
+				tr.SrcTokenized = ""
+			}
+			repl.Translation[idx].Translated = append(repl.Translation[idx].Translated, tr)
+		}
+	}
 	return repl
 }
 
@@ -402,7 +518,6 @@ func quote(s string) string {
 func doCmd(format string, a ...interface{}) (string, error) {
 	cmd := exec.Command(SH, "-c", fmt.Sprintf(format, a...))
 	cmd.Env = []string{
-		"ALPINO_HOME=" + ALPINO,
 		"PATH=" + PATH,
 		"LANG=en_US.utf8",
 		"LANGUAGE=en_US.utf8",
@@ -425,24 +540,14 @@ func doCmd(format string, a ...interface{}) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-func tokNL(s string) (string, error) {
-	s = strings.Join(strings.Fields(s), " ")
-	return doCmd("echo %s | $ALPINO_HOME/Tokenization/tokenize_no_breaks.sh | %s --model corpus/truecase-model.nl", quote(s), TRUECASER)
-}
-
-func tokEN(s string) (string, error) {
-	s = strings.Join(strings.Fields(s), " ")
-	return doCmd("echo %s | %s -l en | %s --model corpus/truecase-model.en", quote(s), TOKENIZER, TRUECASER)
-}
-
 func untok(s, lang string) (string, error) {
 	// er is geen detokenizer voor Nederlands!
 	return doCmd("echo %s | %s | %s -l en", quote(s), DETRUECASER, DETOKENIZER)
 }
 
-func doMoses(r *Request) ([]byte, error) {
+func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([]byte, error) {
 	port := "9071"
-	if r.SourceLang == "nl" {
+	if sourceLang == "nl" {
 		port = "9072"
 	}
 
@@ -459,8 +564,8 @@ func doMoses(r *Request) ([]byte, error) {
             <name>text</name>
             <value>%s</value>
           </member>
-`, html.EscapeString(r.Tokenized))
-	if r.AlignmentInfo {
+`, html.EscapeString(tokenized))
+	if alignmentInfo {
 		fmt.Fprint(&buf,
 			`          <member>
             <name>align</name>
@@ -482,7 +587,7 @@ func doMoses(r *Request) ([]byte, error) {
     </param>
   </params>
 </methodCall>
-`, r.NBestSize)
+`, nBestSize)
 
 	resp, err := http.Post("http://127.0.0.1:"+port+"/RPC2", "text/xml", &buf)
 
@@ -517,16 +622,16 @@ Examples:
         "action":        "translate",
         "sourceLang":    "nl",
         "targetLang":    "en",
-        "text":          "Dit is een test.",
+        "text":          "Dit is een test. En dit is ook een test.",
         "detokenize":    true,
         "alignmentInfo": true,
-        "nBestSize":     10
+        "nBestSize":     3
     }' http://zardoz.service.rug.nl:9070/rpc
 </pre>
 <p>
 or:
 <pre>
-    <a href="http://zardoz.service.rug.nl:9070/rpc?action=translate&amp;sourceLang=nl&amp;targetLang=en&amp;text=Dit+is+een+test.&amp;detokenize=true&amp;alignmentInfo=true&amp;nBestSize=10">http://zardoz.service.rug.nl:9070/rpc?action=translate&amp;sourceLang=nl&amp;targetLang=en&amp;text=Dit+is+een+test.&amp;detokenize=true&amp;alignmentInfo=true&amp;nBestSize=10</a>
+    <a href="http://zardoz.service.rug.nl:9070/rpc?action=translate&amp;sourceLang=nl&amp;targetLang=en&amp;text=Dit+is+een+test.+En+dit+is+ook+een+test.&amp;detokenize=true&amp;alignmentInfo=true&amp;nBestSize=3">http://zardoz.service.rug.nl:9070/rpc?action=translate&amp;sourceLang=nl&amp;targetLang=en&amp;text=Dit+is+een+test.+En+dit+is+ook+een+test.&amp;detokenize=true&amp;alignmentInfo=true&amp;nBestSize=3</a>
 </pre>
 <p>
 See: <a href="https://github.com/ufal/mtmonkey/blob/master/API.md">API</a>
