@@ -424,7 +424,7 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 			repl.Translation[idx].ErrorCode = 99
 			repl.Translation[idx].ErrorMessage = resp.err
 			repl.ErrorCode = 99
-			repl.ErrorMessage = "There were errors with some translations"
+			repl.ErrorMessage = "Failed to translate some sentence(s)"
 			continue
 		}
 
