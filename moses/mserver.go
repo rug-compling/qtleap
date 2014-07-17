@@ -93,9 +93,10 @@ type DataT struct {
 ////////////////////////////////////////////////////////////////
 
 type ResponseT struct {
-	mt  *MethodResponseT
-	tok string
-	err string
+	mt     *MethodResponseT
+	tok    string
+	err    string
+	errnum int
 }
 
 ////////////////////////////////////////////////////////////////
@@ -325,18 +326,22 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if n := len(strings.Fields(line)); n > 100 {
 			rs.err = "Line has more than 100 words (after tokenisation)"
+			rs.errnum = 5
 		} else if n == 0 {
 			rs.err = "Missing text"
+			rs.errnum = 5
 		} else {
 			line = strings.Replace(line, "|", "_", -1)
 			resp, err := doMoses(req.SourceLang, line, req.AlignmentInfo, req.NBestSize)
 			if err != nil {
 				log.Print("Moses: ", err)
 				rs.err = err.Error()
+				rs.errnum = 8
 			} else {
 				xml.Unmarshal(resp, rs.mt)
 				if len(rs.mt.Fault) > 0 {
 					rs.err = "unknown"
+					rs.errnum = 8
 					for _, member := range rs.mt.Fault[0].Value.Struct.Member {
 						if member.Name == "faultString" {
 							rs.err = html.EscapeString(member.Value.String)
@@ -420,11 +425,14 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 
 	for idx, resp := range responses {
 
-		if resp.err != "" {
-			repl.Translation[idx].ErrorCode = 99
-			repl.Translation[idx].ErrorMessage = resp.err
+		if resp.errnum != 0 || resp.err != "" {
 			repl.ErrorCode = 99
 			repl.ErrorMessage = "Failed to translate some sentence(s)"
+			repl.Translation[idx].ErrorCode = resp.errnum
+			repl.Translation[idx].ErrorMessage = resp.err
+			if resp.errnum == 0 {
+				repl.Translation[idx].ErrorCode = 99
+			}
 			continue
 		}
 
