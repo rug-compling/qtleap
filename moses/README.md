@@ -2,13 +2,12 @@ This runs on http://zardoz.service.rug.nl:9070/
 
 See also: [API](https://github.com/ufal/mtmonkey/blob/master/API.md)
 
-It is slow, and with only one sentence per request, is this even useful?
-This is state of the art?
+It is slow, is this even useful? This is state of the art?
 
 This works on a model that was trained with these escapes:
 
- - & → &amp;
- - | → &#124;
+ - &amp; → &amp;amp;
+ - | → &amp;#124;
 
 Problems:
 
