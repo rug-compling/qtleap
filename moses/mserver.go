@@ -1,8 +1,12 @@
 /*
 
- TODO: rotate log
+ Moses is getraind met deze escapes:
 
- TODO: '|' in invoer wordt omgezet in '_', is dat OK?
+    & -> &amp;
+    | -> &#124;
+
+
+ TODO: rotate log
 
 */
 
@@ -26,13 +30,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
 	SH          = "/bin/sh"
-	PATH        = "/net/aistaff/kleiweg/paqu/bin:/bin:/usr/bin:/net/aps/64/bin"
+	PATH        = "/net/aistaff/alfa/qtleap/moses/bin:/bin:/usr/bin:/net/aps/64/bin"
 	TRUECASER   = "/net/aps/64/opt/moses/mosesdecoder/scripts/recaser/truecase.perl"
-	DETRUECASER = "/net/aps/64/opt/moses/mosesdecoder/scripts/recaser/detruecase.perl"
 	TOKENIZER   = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/tokenizer.perl"
 	DETOKENIZER = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/detokenizer.perl"
 	POOLSIZE    = 12   // gelijk aan aantal threads in elk van de twee mosesservers
@@ -110,8 +114,8 @@ type Json struct {
 }
 
 type TranslationT struct {
-	ErrorCode    int           `json:"errorCode"`
-	ErrorMessage string        `json:"errorMessage"`
+	ErrorCode    int           `json:"errorCode,omitempty"`
+	ErrorMessage string        `json:"errorMessage,omitempty"`
 	Translated   []TranslatedT `json:"translated,omitempty"`
 }
 
@@ -271,7 +275,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				rerror(w, 8, "Tokenizer: "+err.Error())
 				return
 			}
-			ss, err := doCmd("echo %s | %s --model corpus/truecase-model.nl", quote(strings.TrimSpace(tok)), TRUECASER)
+			ss, err := doCmd("echo %s | %s --model corpus/data/truecase-model.nl", quote(strings.TrimSpace(tok)), TRUECASER)
 			if err != nil {
 				rerror(w, 8, "Truecaser: "+err.Error())
 				return
@@ -283,21 +287,22 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
+			// tokenizer van moses zet tekens om in entities, dit moet ongedaan worden
 			var ss string
 			if run {
-				s1, err := doCmd("echo %s | %s -l en", quote(part), TOKENIZER)
+				s1, err := doCmd("echo %s | %s -l en | unescape", quote(part), TOKENIZER)
 				if err != nil {
 					rerror(w, 8, "Tokenizer: "+err.Error())
 					return
 				}
-				ss, err = doCmd("echo %s | %s --model corpus/truecase-model.en", quote(splitlines(part, s1)), TRUECASER)
+				ss, err = doCmd("echo %s | %s --model corpus/data/truecase-model.en", quote(splitlines(part, s1)), TRUECASER)
 				if err != nil {
 					rerror(w, 8, "Truecaser: "+err.Error())
 					return
 				}
 			} else {
 				var err error
-				ss, err = doCmd("echo %s | %s -l en | %s --model corpus/truecase-model.en", quote(part), TOKENIZER, TRUECASER)
+				ss, err = doCmd("echo %s | %s -l en | unescape | %s --model corpus/data/truecase-model.en", quote(part), TOKENIZER, TRUECASER)
 				if err != nil {
 					rerror(w, 8, "Tokenizer or Truecaser: "+err.Error())
 					return
@@ -331,7 +336,6 @@ func handle(w http.ResponseWriter, r *http.Request) {
 			rs.err = "Missing text"
 			rs.errnum = 5
 		} else {
-			line = strings.Replace(line, "|", "_", -1)
 			resp, err := doMoses(req.SourceLang, line, req.AlignmentInfo, req.NBestSize)
 			if err != nil {
 				log.Print("Moses: ", err)
@@ -344,7 +348,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 					rs.errnum = 8
 					for _, member := range rs.mt.Fault[0].Value.Struct.Member {
 						if member.Name == "faultString" {
-							rs.err = html.EscapeString(member.Value.String)
+							rs.err = member.Value.String
 						}
 					}
 				}
@@ -389,7 +393,7 @@ func splitlines(ori, tok string) string {
 		} else {
 			out[i] = t + " "
 		}
-		if n := len(html.UnescapeString(t)); len(ori) > n {
+		if n := len(t); len(ori) > n {
 			ori = ori[n:]
 		}
 	}
@@ -436,9 +440,6 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 			continue
 		}
 
-		repl.Translation[idx].ErrorCode = 0
-		repl.Translation[idx].ErrorMessage = "OK"
-
 		repl.Translation[idx].Translated = make([]TranslatedT, 0)
 
 		var nbest []ValueT
@@ -478,7 +479,7 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 						tr.AlignmentRaw = append(tr.AlignmentRaw, a)
 					}
 				case "hyp":
-					tr.TgtTokenized = strings.TrimSpace(member.Value.String)
+					tr.TgtTokenized = strings.TrimSpace(unescape(member.Value.String))
 					if dodetok {
 						var err error
 						tr.Text, err = untok(tr.TgtTokenized, tgtlang)
@@ -548,9 +549,49 @@ func doCmd(format string, a ...interface{}) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
+func untrue(s, lang string) string {
+	// invoer was 1 zin, maar kan vertaald zijn naar meerdere zinnen
+	inwords := strings.Fields(s)
+	outwords := make([]string, len(inwords))
+	state := 1 // need cap
+	for i, word := range inwords {
+		switch state {
+		case 0: // normal
+			outwords[i] = word
+			if word == "." || word == "!" || word == "?" {
+				state = 1
+			}
+		case 1: // need cap
+			if lang == "nl" {
+				if word == "'s" {
+					outwords[i] = word
+					break
+				}
+				if strings.HasPrefix(word, "ij") {
+					outwords[i] = "IJ" + word[2:]
+					state = 0
+					break
+				}
+			}
+			var w string
+			for j, c := range word {
+				if j == 0 && unicode.IsLetter(c) {
+					w = string(unicode.ToUpper(c))
+					state = 0
+				} else {
+					w += word[j:]
+					break
+				}
+			}
+			outwords[i] = w
+		}
+	}
+	return strings.Join(outwords, " ")
+}
+
 func untok(s, lang string) (string, error) {
 	// er is geen detokenizer voor Nederlands!
-	return doCmd("echo %s | %s | %s -l en", quote(s), DETRUECASER, DETOKENIZER)
+	return doCmd("echo %s | %s -l en", quote(untrue(s, lang)), DETOKENIZER)
 }
 
 func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([]byte, error) {
@@ -572,7 +613,7 @@ func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([
             <name>text</name>
             <value>%s</value>
           </member>
-`, html.EscapeString(tokenized))
+`, html.EscapeString(escape(tokenized)))
 	if alignmentInfo {
 		fmt.Fprint(&buf,
 			`          <member>
@@ -607,6 +648,14 @@ func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([
 	resp.Body.Close()
 
 	return b, nil
+}
+
+func escape(s string) string {
+	return strings.Replace(strings.Replace(s, "&", "&amp;", -1), "|", "&#124;", -1)
+}
+
+func unescape(s string) string {
+	return strings.Replace(strings.Replace(s, "&#124;", "|", -1), "&amp;", "&", -1)
 }
 
 ////////////////////////////////////////////////////////////////
