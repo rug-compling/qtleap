@@ -36,7 +36,7 @@ import (
 
 const (
 	SH        = "/bin/sh"
-	PATH      = "/net/aistaff/alfa/qtleap/moses/bin:/bin:/usr/bin:/net/aps/64/bin"
+	PATH      = "/bin:/usr/bin:/net/aps/64/bin"
 	TRUECASER = "/net/aps/64/opt/moses/mosesdecoder/scripts/recaser/truecase.perl"
 	TOKENIZER = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/tokenizer.perl"
 	POOLSIZE  = 12   // gelijk aan aantal threads in elk van de twee mosesservers
@@ -263,57 +263,47 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 
-	parts := strings.Split(rePar.ReplaceAllLiteralString("\n\n", strings.TrimSpace(req.Text)), "\n\n")
+	parts := strings.Split(rePar.ReplaceAllLiteralString(req.Text, "\n\n"), "\n\n")
 	lines := make([]string, 0)
 	for _, part := range parts {
+		part = strings.TrimSpace(part)
 		run := isRun(strings.Split(part, "\n"))
 		if run {
 			part = strings.Replace(part, "\n", " ", -1)
 		}
+
+		var ss string
+		var err error
 		if req.SourceLang == "nl" {
-			tok, err := tokenize.Dutch(part, run)
+			ss, err = tokenize.Dutch(part, run)
 			if err != nil {
 				rerror(w, 8, "Tokenizer: "+err.Error())
 				return
 			}
-			ss, err := doCmd("echo %s | %s --model corpus/data/truecase-model.nl", quote(strings.TrimSpace(tok)), TRUECASER)
+			ss = strings.TrimSpace(ss)
+		} else {
+			ss, err = doCmd("echo %s | %s -l en", quote(part), TOKENIZER)
 			if err != nil {
-				rerror(w, 8, "Truecaser: "+err.Error())
+				rerror(w, 8, "Tokenizer: "+err.Error())
 				return
 			}
-			for _, s := range strings.Split(ss, "\n") {
-				s = strings.TrimSpace(s)
-				if s != "" {
-					lines = append(lines, s)
-				}
-			}
-		} else {
-			// tokenizer van moses zet tekens om in entities, dit moet ongedaan worden
-			var ss string
+			ss = html.UnescapeString(ss)
 			if run {
-				s1, err := doCmd("echo %s | %s -l en | unescape", quote(part), TOKENIZER)
-				if err != nil {
-					rerror(w, 8, "Tokenizer: "+err.Error())
-					return
-				}
-				ss, err = doCmd("echo %s | %s --model corpus/data/truecase-model.en", quote(splitlines(part, s1)), TRUECASER)
-				if err != nil {
-					rerror(w, 8, "Truecaser: "+err.Error())
-					return
-				}
-			} else {
-				var err error
-				ss, err = doCmd("echo %s | %s -l en | unescape | %s --model corpus/data/truecase-model.en", quote(part), TOKENIZER, TRUECASER)
-				if err != nil {
-					rerror(w, 8, "Tokenizer or Truecaser: "+err.Error())
-					return
-				}
+				ss = splitlines(part, ss)
 			}
-			for _, s := range strings.Split(ss, "\n") {
-				s = strings.TrimSpace(s)
-				if s != "" {
-					lines = append(lines, s)
-				}
+		}
+
+		// here we escape '&' and '|' because those were the escapes in the training data
+		ss, err = doCmd("echo %s | %s --model corpus/data/truecase-model.%s", quote(escape(ss)), TRUECASER, req.SourceLang)
+		if err != nil {
+			rerror(w, 8, "Truecaser: "+err.Error())
+			return
+		}
+
+		for _, s := range strings.Split(ss, "\n") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				lines = append(lines, s)
 			}
 		}
 	}
@@ -452,7 +442,7 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 
 		for i, translated := range nbest {
 			tr := TranslatedT{
-				SrcTokenized: strings.TrimSpace(resp.tok),
+				SrcTokenized: strings.TrimSpace(unescape(resp.tok)),
 				Rank:         i,
 			}
 			for _, member := range translated.Struct.Member {
@@ -661,7 +651,7 @@ func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([
             <name>text</name>
             <value>%s</value>
           </member>
-`, html.EscapeString(escape(tokenized)))
+`, html.EscapeString(tokenized))
 	if alignmentInfo {
 		fmt.Fprint(&buf,
 			`          <member>
