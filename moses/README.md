@@ -9,9 +9,3 @@ no other):
 
  - &amp; → &amp;amp;
  - | → &amp;#124;
-
-Problems:
-
- - There are no rules for detokenizing Dutch. Using the English rules
-   will give incorrect results for m-dash. And does it know about
-   Dutch quotes?

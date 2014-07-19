@@ -31,16 +31,16 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
-	SH          = "/bin/sh"
-	PATH        = "/net/aistaff/alfa/qtleap/moses/bin:/bin:/usr/bin:/net/aps/64/bin"
-	TRUECASER   = "/net/aps/64/opt/moses/mosesdecoder/scripts/recaser/truecase.perl"
-	TOKENIZER   = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/tokenizer.perl"
-	DETOKENIZER = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/detokenizer.perl"
-	POOLSIZE    = 12   // gelijk aan aantal threads in elk van de twee mosesservers
-	QUEUESIZE   = 1000 // inclusief request die nu verwerkt worden
+	SH        = "/bin/sh"
+	PATH      = "/net/aistaff/alfa/qtleap/moses/bin:/bin:/usr/bin:/net/aps/64/bin"
+	TRUECASER = "/net/aps/64/opt/moses/mosesdecoder/scripts/recaser/truecase.perl"
+	TOKENIZER = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/tokenizer.perl"
+	POOLSIZE  = 12   // gelijk aan aantal threads in elk van de twee mosesservers
+	QUEUESIZE = 1000 // inclusief request die nu verwerkt worden
 )
 
 var (
@@ -48,6 +48,7 @@ var (
 	rePunct    = regexp.MustCompile(`^[.!?]+$`)
 	reEndPoint = regexp.MustCompile(`\pL\pL\pP*[.!?]\s*$`)
 	reMidPoint = regexp.MustCompile(`\p{Ll}\p{Ll}\pP*[.!?]\s+\p{Lu}`)
+	reTokPoint = regexp.MustCompile(`^[.!?]+$`)
 )
 
 ////////////////////////////////////////////////////////////////
@@ -481,23 +482,19 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 				case "hyp":
 					tr.TgtTokenized = strings.TrimSpace(unescape(member.Value.String))
 					if dodetok {
-						var err error
-						tr.Text, err = untok(tr.TgtTokenized, tgtlang)
-						if err != nil {
-							log.Print("Untokenize: ", err)
-							tr.Text = "ERROR: " + err.Error()
-						}
+						tr.Text = untok(tr.TgtTokenized, tgtlang)
+					} else {
+						tr.Text = tr.TgtTokenized
 					}
 				case "totalScore":
 					tr.Score = member.Value.Double
 				}
 			}
-			if !dodetok {
-				tr.Text = tr.TgtTokenized
-			}
-			if !doalign && len(responses) < 2 {
+			if !doalign {
 				tr.TgtTokenized = ""
-				tr.SrcTokenized = ""
+				if len(responses) < 2 {
+					tr.SrcTokenized = ""
+				}
 			}
 			repl.Translation[idx].Translated = append(repl.Translation[idx].Translated, tr)
 		}
@@ -589,9 +586,60 @@ func untrue(s, lang string) string {
 	return strings.Join(outwords, " ")
 }
 
-func untok(s, lang string) (string, error) {
-	// er is geen detokenizer voor Nederlands!
-	return doCmd("echo %s | %s -l en", quote(untrue(s, lang)), DETOKENIZER)
+func untok(s, lang string) string {
+
+	words := strings.Fields(untrue(s, lang))
+	doubO := false
+	singO := false
+	for i, word := range words {
+		if utf8.RuneCountInString(word) == 1 {
+			if strings.Contains(".,:;!?)]}", word) {
+				words[i] = "\a" + word
+				continue
+			}
+			if strings.Contains("([{", word) {
+				words[i] = word + "\a"
+				continue
+			}
+			if strings.Contains("\\/", word) {
+				words[i] = "\a" + word + "\a"
+				continue
+			}
+			if strings.Contains("'`’‘‚", word) {
+				if singO {
+					words[i] = "\a" + word
+				} else {
+					words[i] = word + "\a"
+				}
+				singO = !singO
+				continue
+			}
+			if strings.Contains(`"”„“`, word) {
+				if doubO {
+					words[i] = "\a" + word
+				} else {
+					words[i] = word + "\a"
+				}
+				doubO = !doubO
+				continue
+			}
+		}
+		if lang == "en" && (word == "'s" || word == "'t") {
+			words[i] = "\a" + word
+			continue
+		}
+		if reTokPoint.MatchString(word) {
+			words[i] = "\a" + word
+			continue
+		}
+	}
+
+	s = strings.Join(words, " ")
+	s = strings.Replace(s, " \a", "", -1)
+	s = strings.Replace(s, "\a ", "", -1)
+	s = strings.Replace(s, "\a", "", -1)
+	return s
+
 }
 
 func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([]byte, error) {
