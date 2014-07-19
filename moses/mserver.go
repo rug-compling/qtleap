@@ -550,7 +550,7 @@ func untrue(s, lang string) string {
 			}
 		case 1: // need cap
 			if lang == "nl" {
-				if word == "'s" {
+				if word == "'s" || word == "'t" {
 					outwords[i] = word
 					break
 				}
