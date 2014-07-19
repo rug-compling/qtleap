@@ -19,7 +19,7 @@ case "`ps -p $(< pid1.txt)`" in
 	;;
     *)
 	echo Starting mosesserver en-nl
-	/net/aps/64/opt/moses/mosesdecoder/bin/mosesserver -f moses-en-nl.ini --server-port 9071 >/dev/null 2>/dev/null &
+	/net/aps/64/opt/moses/mosesdecoder/bin/mosesserver -f corpus/moses-en-nl.ini --server-port 9071 >/dev/null 2>/dev/null &
 	echo $! > pid1.txt
 	;;
 esac
@@ -29,7 +29,7 @@ case "`ps -p $(< pid2.txt)`" in
 	;;
     *)
 	echo Starting mosesserver nl-en
-	/net/aps/64/opt/moses/mosesdecoder/bin/mosesserver -f moses-nl-en.ini --server-port 9072 >/dev/null 2>/dev/null &
+	/net/aps/64/opt/moses/mosesdecoder/bin/mosesserver -f corpus/moses-nl-en.ini --server-port 9072 >/dev/null 2>/dev/null &
 	echo $! > pid2.txt
 esac
 
