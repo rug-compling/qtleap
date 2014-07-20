@@ -15,6 +15,7 @@ package main
 import (
 	"github.com/pebbe/tokenize"
 
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -24,6 +25,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -35,20 +37,24 @@ import (
 )
 
 const (
-	SH        = "/bin/sh"
-	PATH      = "/bin:/usr/bin:/net/aps/64/bin"
-	TRUECASER = "/net/aps/64/opt/moses/mosesdecoder/scripts/recaser/truecase.perl"
-	TOKENIZER = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/tokenizer.perl"
-	POOLSIZE  = 12   // gelijk aan aantal threads in elk van de twee mosesservers
-	QUEUESIZE = 1000 // inclusief request die nu verwerkt worden
+	SH            = "/bin/sh"
+	PATH          = "/bin:/usr/bin:/net/aps/64/bin"
+	TRUECASEMODEL = "corpus/data/truecase-model"
+	TOKENIZER     = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/tokenizer.perl"
+	POOLSIZE      = 12   // gelijk aan aantal threads in elk van de twee mosesservers
+	QUEUESIZE     = 1000 // inclusief request die nu verwerkt worden
 )
 
 var (
 	rePar      = regexp.MustCompile("\n\\s*\n")
 	rePunct    = regexp.MustCompile(`^[.!?]+$`)
 	reEndPoint = regexp.MustCompile(`\pL\pL\pP*[.!?]\s*$`)
-	reMidPoint = regexp.MustCompile(`\p{Ll}\p{Ll}\pP*[.!?]\s+\p{Lu}`)
-	reTokPoint = regexp.MustCompile(`^[.!?]+$`)
+	reMidPoint = regexp.MustCompile(`\p{Ll}\p{Ll}\pP*[.!?]\s+('s\s+|'t\s+)?\p{Lu}`)
+	reLet      = regexp.MustCompile(`\pL`)
+	reLetNum   = regexp.MustCompile(`\pL|\pN`)
+
+	best  = make(map[string]map[string]string)
+	known = make(map[string]map[string]bool)
 )
 
 ////////////////////////////////////////////////////////////////
@@ -166,6 +172,32 @@ var (
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	for _, lang := range []string{"nl", "en"} {
+		best[lang] = make(map[string]string)
+		known[lang] = make(map[string]bool)
+		fp, err := os.Open(TRUECASEMODEL + "." + lang)
+		if err != nil {
+			log.Fatal(err)
+		}
+		scanner := bufio.NewScanner(fp)
+		for scanner.Scan() {
+			aa := strings.Fields(scanner.Text())
+			if len(aa) > 0 && reLet.MatchString(aa[0]) {
+				best[lang][strings.ToLower(aa[0])] = aa[0]
+				known[lang][aa[0]] = true
+				for _, a := range aa[1:] {
+					if reLet.MatchString(a) {
+						known[lang][a] = true
+					}
+				}
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			log.Fatal(err)
+		}
+		fp.Close()
+	}
 
 	http.HandleFunc("/", info)
 	http.HandleFunc("/rpc", handle)
@@ -294,15 +326,39 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// here we escape '&' and '|' because those were the escapes in the training data
-		ss, err = doCmd("echo %s | %s --model corpus/data/truecase-model.%s", quote(escape(ss)), TRUECASER, req.SourceLang)
-		if err != nil {
-			rerror(w, 8, "Truecaser: "+err.Error())
-			return
-		}
+		ss = escape(ss)
 
 		for _, s := range strings.Split(ss, "\n") {
 			s = strings.TrimSpace(s)
 			if s != "" {
+
+				// truecase
+				words := strings.Fields(s)
+				sentence_start := true
+				for i, word := range words {
+					lcword := strings.ToLower(word)
+					if w, ok := best[req.SourceLang][lcword]; sentence_start && ok {
+						// truecase sentence start
+						words[i] = w
+					} else if known[req.SourceLang][word] {
+						// don't change known words
+					} else if w, ok := best[req.SourceLang][lcword]; ok {
+						// truecase otherwise unknown words
+						words[i] = w
+					}
+					switch sentence_start {
+					case false:
+						if rePunct.MatchString(word) {
+							sentence_start = true
+						}
+					case true:
+						if reLetNum.MatchString(word) && word != "'s" && word != "'t" {
+							sentence_start = false
+						}
+					}
+				}
+				s = strings.Join(words, " ")
+
 				lines = append(lines, s)
 			}
 		}
@@ -393,18 +449,18 @@ func splitlines(ori, tok string) string {
 
 func isRun(lines []string) bool {
 	ln := float64(len(lines))
+	if ln < 2 {
+		return true
+	}
 	midpoint := float64(0)
-	endpoint := float64(0)
-	for i, line := range lines {
-		if i < len(lines)-1 && reEndPoint.MatchString(line) {
-			endpoint += 1
+	endletter := float64(0)
+	for _, line := range lines {
+		if !reEndPoint.MatchString(line) {
+			endletter += 1
 		}
 		midpoint += float64(len(reMidPoint.FindAllString(line, -1)))
 	}
-	if endpoint > (ln-1)*.7 {
-		return false
-	}
-	if midpoint > ln*.3 {
+	if endletter > ln*.3 || midpoint > ln*.3 {
 		return true
 	}
 	return false
@@ -618,7 +674,7 @@ func untok(s, lang string) string {
 			words[i] = "\a" + word
 			continue
 		}
-		if reTokPoint.MatchString(word) {
+		if rePunct.MatchString(word) {
 			words[i] = "\a" + word
 			continue
 		}
