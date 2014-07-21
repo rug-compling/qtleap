@@ -123,6 +123,7 @@ type Json struct {
 type TranslationT struct {
 	ErrorCode    int           `json:"errorCode,omitempty"`
 	ErrorMessage string        `json:"errorMessage,omitempty"`
+	SrcTokenized string        `json:"src-tokenized,omitempty"`
 	Translated   []TranslatedT `json:"translated,omitempty"`
 }
 
@@ -130,8 +131,7 @@ type TranslatedT struct {
 	Text         string          `json:"text,omitempty"`
 	Score        float64         `json:"score"`
 	Rank         int             `json:"rank"`
-	TgtTokenized string          `json:"tgt-tokenized,omitempty"`
-	SrcTokenized string          `json:"src-tokenized,omitempty"`
+	Tokenized    string          `json:"tokenized,omitempty"`
 	AlignmentRaw []AlignmentRawT `json:"alignment-raw,omitempty"`
 }
 
@@ -413,7 +413,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 					for i := 0; i < n-1; i++ {
 						tt.AlignmentRaw[i].TgtEnd = tt.AlignmentRaw[i+1].TgtStart - 1
 					}
-					tt.AlignmentRaw[n-1].TgtEnd = len(strings.Fields(tt.TgtTokenized)) - 1
+					tt.AlignmentRaw[n-1].TgtEnd = len(strings.Fields(tt.Tokenized)) - 1
 				}
 			}
 		}
@@ -489,6 +489,10 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 
 		repl.Translation[idx].Translated = make([]TranslatedT, 0)
 
+		if doalign || len(responses) > 1 {
+			repl.Translation[idx].SrcTokenized = strings.TrimSpace(unescape(resp.tok))
+		}
+
 		var nbest []ValueT
 		for _, member := range resp.mt.Params.Param.Value.Struct.Member {
 			if member.Name == "nbest" {
@@ -498,8 +502,7 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 
 		for i, translated := range nbest {
 			tr := TranslatedT{
-				SrcTokenized: strings.TrimSpace(unescape(resp.tok)),
-				Rank:         i,
+				Rank: i,
 			}
 			for _, member := range translated.Struct.Member {
 				switch member.Name {
@@ -526,21 +529,18 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 						tr.AlignmentRaw = append(tr.AlignmentRaw, a)
 					}
 				case "hyp":
-					tr.TgtTokenized = strings.TrimSpace(unescape(member.Value.String))
+					tr.Tokenized = strings.TrimSpace(unescape(member.Value.String))
 					if dodetok {
-						tr.Text = untok(tr.TgtTokenized, tgtlang)
+						tr.Text = untok(tr.Tokenized, tgtlang)
 					} else {
-						tr.Text = tr.TgtTokenized
+						tr.Text = tr.Tokenized
 					}
 				case "totalScore":
 					tr.Score = member.Value.Double
 				}
 			}
 			if !doalign {
-				tr.TgtTokenized = ""
-				if len(responses) < 2 {
-					tr.SrcTokenized = ""
-				}
+				tr.Tokenized = ""
 			}
 			repl.Translation[idx].Translated = append(repl.Translation[idx].Translated, tr)
 		}
