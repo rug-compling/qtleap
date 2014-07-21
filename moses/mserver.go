@@ -123,6 +123,7 @@ type Json struct {
 type TranslationT struct {
 	ErrorCode    int           `json:"errorCode,omitempty"`
 	ErrorMessage string        `json:"errorMessage,omitempty"`
+	Src          string        `json:"src,omitempty"`
 	SrcTokenized string        `json:"src-tokenized,omitempty"`
 	Translated   []TranslatedT `json:"translated,omitempty"`
 }
@@ -474,6 +475,13 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 		ErrorMessage: "OK",
 	}
 
+	var srclang string
+	if tgtlang == "nl" {
+		srclang = "en"
+	} else {
+		srclang = "nl"
+	}
+
 	for idx, resp := range responses {
 
 		if resp.errnum != 0 || resp.err != "" {
@@ -491,6 +499,9 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 
 		if doalign || len(responses) > 1 {
 			repl.Translation[idx].SrcTokenized = strings.TrimSpace(unescape(resp.tok))
+		}
+		if len(responses) > 1 {
+			repl.Translation[idx].Src = untok(repl.Translation[idx].SrcTokenized, srclang)
 		}
 
 		var nbest []ValueT
