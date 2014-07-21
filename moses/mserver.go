@@ -786,6 +786,8 @@ or:
 </pre>
 <p>
 See: <a href="https://github.com/ufal/mtmonkey/blob/master/API.md">API</a>
+<p>
+Sources: <a href="https://github.com/rug-compling/qtleap/tree/master/moses">github</a>
   </body>
 </html>
 `)
