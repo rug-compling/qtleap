@@ -475,12 +475,14 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 		ErrorMessage: "OK",
 	}
 
-	var srclang string
-	if tgtlang == "nl" {
-		srclang = "en"
-	} else {
-		srclang = "nl"
-	}
+	/*
+		var srclang string
+		if tgtlang == "nl" {
+			srclang = "en"
+		} else {
+			srclang = "nl"
+		}
+	*/
 
 	for idx, resp := range responses {
 
@@ -501,7 +503,7 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 			repl.Translation[idx].SrcTokenized = strings.TrimSpace(unescape(resp.tok))
 		}
 		if len(responses) > 1 {
-			repl.Translation[idx].Src = untok(repl.Translation[idx].SrcTokenized, srclang)
+			// repl.Translation[idx].Src = untok(repl.Translation[idx].SrcTokenized, srclang)
 		}
 
 		var nbest []ValueT
