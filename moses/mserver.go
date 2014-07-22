@@ -59,29 +59,27 @@ var (
 
 ////////////////////////////////////////////////////////////////
 
-type MethodResponseT struct {
-	XMLName xml.Name `xml:"methodResponse"`
-	Params  ParamsT  `xml:"params"`
-	Fault   []FaultT `xml:"fault"`
-}
-type FaultT struct {
-	Value ValueT `xml:"value"`
+type MosesCallT struct {
+	XMLName    xml.Name  `xml:"methodCall"`
+	MethodName string    `xml:"methodName"`
+	Params     []MemberT `xml:"params>param>value>struct>member"`
 }
 
-type ParamsT struct {
-	Param ParamT `xml:"param"`
-}
-
-type ParamT struct {
-	Value ValueT `xml:"value"`
+type MosesResponseT struct {
+	XMLName xml.Name  `xml:"methodResponse"`
+	Params  []MemberT `xml:"params>param>value>struct>member"`
+	Fault   []MemberT `xml:"fault>value>struct>member"`
 }
 
 type ValueT struct {
-	Struct StructT `xml:"struct"`
-	String string  `xml:"string"`
-	Array  ArrayT  `xml:"array"`
-	I4     int     `xml:"i4"`
-	Double float64 `xml:"double"`
+	I4      *int     `xml:"i4,omitempty"`
+	Int     *int     `xml:"int,omitempty"`
+	Boolean *int     `xml:"boolean,omitempty"`
+	String  *string  `xml:"string,omitempty"`
+	Text    string   `xml:",chardata""`
+	Double  *float64 `xml:"double,omitempty"`
+	Struct  *StructT `xml:"struct,omitempty"`
+	Array   *ArrayT  `xml:"array,omitempty"`
 }
 
 type StructT struct {
@@ -94,17 +92,13 @@ type MemberT struct {
 }
 
 type ArrayT struct {
-	Data DataT `xml:"data"`
-}
-
-type DataT struct {
-	Value []ValueT `xml:"value"`
+	Data []ValueT `xml:"data>value"`
 }
 
 ////////////////////////////////////////////////////////////////
 
-type ResponseT struct {
-	mt     *MethodResponseT
+type MosesT struct {
+	mt     *MosesResponseT
 	tok    string
 	err    string
 	errnum int
@@ -371,10 +365,10 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		req.NBestSize = 10
 	}
 
-	responses := make([]*ResponseT, 0)
+	responses := make([]*MosesT, 0)
 	for _, line := range lines {
-		rs := &ResponseT{
-			mt:  &MethodResponseT{},
+		rs := &MosesT{
+			mt:  &MosesResponseT{},
 			tok: line,
 		}
 		if n := len(strings.Fields(line)); n > 100 {
@@ -390,13 +384,19 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				rs.err = err.Error()
 				rs.errnum = 8
 			} else {
-				xml.Unmarshal(resp, rs.mt)
+				if err := xml.Unmarshal(resp, rs.mt); err != nil {
+					panic(err)
+				}
 				if len(rs.mt.Fault) > 0 {
 					rs.err = "unknown"
 					rs.errnum = 8
-					for _, member := range rs.mt.Fault[0].Value.Struct.Member {
+					for _, member := range rs.mt.Fault {
 						if member.Name == "faultString" {
-							rs.err = member.Value.String
+							if member.Value.String != nil {
+								rs.err = *member.Value.String
+							} else {
+								rs.err = member.Value.Text
+							}
 						}
 					}
 				}
@@ -467,7 +467,7 @@ func isRun(lines []string) bool {
 	return false
 }
 
-func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) *Json {
+func decodeMulti(responses []*MosesT, dodetok, doalign bool, tgtlang string) *Json {
 
 	repl := &Json{
 		Translation:  make([]TranslationT, len(responses)),
@@ -507,9 +507,9 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 		}
 
 		var nbest []ValueT
-		for _, member := range resp.mt.Params.Param.Value.Struct.Member {
+		for _, member := range resp.mt.Params {
 			if member.Name == "nbest" {
-				nbest = member.Value.Array.Data.Value
+				nbest = member.Value.Array.Data
 			}
 		}
 
@@ -521,7 +521,7 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 				switch member.Name {
 				case "align":
 					tr.AlignmentRaw = make([]AlignmentRawT, 0)
-					for _, v := range member.Value.Array.Data.Value {
+					for _, v := range member.Value.Array.Data {
 						a := AlignmentRawT{
 							SrcStart: -1,
 							SrcEnd:   -1,
@@ -529,7 +529,12 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 							TgtEnd:   -1,
 						}
 						for _, member := range v.Struct.Member {
-							value := member.Value.I4
+							var value int
+							if member.Value.I4 != nil {
+								value = *member.Value.I4
+							} else if member.Value.Int != nil {
+								value = *member.Value.Int
+							}
 							switch member.Name {
 							case "src-end":
 								a.SrcEnd = value
@@ -542,14 +547,14 @@ func decodeMulti(responses []*ResponseT, dodetok, doalign bool, tgtlang string) 
 						tr.AlignmentRaw = append(tr.AlignmentRaw, a)
 					}
 				case "hyp":
-					tr.Tokenized = strings.TrimSpace(unescape(member.Value.String))
+					tr.Tokenized = strings.TrimSpace(unescape(*member.Value.String))
 					if dodetok {
 						tr.Text = untok(tr.Tokenized, tgtlang)
 					} else {
 						tr.Text = tr.Tokenized
 					}
 				case "totalScore":
-					tr.Score = member.Value.Double
+					tr.Score = *member.Value.Double
 				}
 			}
 			if !doalign {
@@ -710,43 +715,47 @@ func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([
 		port = "9072"
 	}
 
-	var buf bytes.Buffer
+	True := 1
 
-	fmt.Fprintf(&buf, `<?xml version="1.0"?>
-<methodCall>
-  <methodName>translate</methodName>
-  <params>
-    <param>
-      <value>
-        <struct>
-          <member>
-            <name>text</name>
-            <value>%s</value>
-          </member>
-`, html.EscapeString(tokenized))
-	if alignmentInfo {
-		fmt.Fprint(&buf,
-			`          <member>
-            <name>align</name>
-            <value><boolean>1</boolean></value>
-          </member>
-`)
+	r := &MosesCallT{
+		MethodName: "translate",
+		Params: []MemberT{
+			MemberT{
+				Name: "text",
+				Value: ValueT{
+					String: &tokenized,
+				},
+			},
+			MemberT{
+				Name: "nbest",
+				Value: ValueT{
+					I4: &nBestSize,
+				},
+			},
+			MemberT{
+				Name: "nbest-distinct",
+				Value: ValueT{
+					Boolean: &True,
+				},
+			},
+		},
 	}
-	fmt.Fprintf(&buf,
-		`          <member>
-            <name>nbest</name>
-            <value><i4>%d</i4></value>
-          </member>
-          <member>
-            <name>nbest-distinct</name>
-            <value><boolean>1</boolean></value>
-          </member>
-        </struct>
-      </value>
-    </param>
-  </params>
-</methodCall>
-`, nBestSize)
+
+	if alignmentInfo {
+		r.Params = append(r.Params,
+			MemberT{
+				Name: "align",
+				Value: ValueT{
+					Boolean: &True,
+				},
+			})
+	}
+
+	m, _ := xml.MarshalIndent(r, "", "  ")
+
+	var buf bytes.Buffer
+	buf.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+	buf.Write(m)
 
 	resp, err := http.Post("http://127.0.0.1:"+port+"/RPC2", "text/xml", &buf)
 
