@@ -630,9 +630,12 @@ func untrue(s, lang string) string {
 				}
 			}
 			var w string
-			for j, c := range word {
+			for j, c := range word { // use range in case first char is multibyte
 				if j == 0 && unicode.IsLetter(c) {
 					w = string(unicode.ToUpper(c))
+					state = 0
+				} else if j == 0 && unicode.IsNumber(c) {
+					w = string(c)
 					state = 0
 				} else {
 					w += word[j:]
