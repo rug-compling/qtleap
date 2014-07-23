@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -59,31 +60,30 @@ var (
 
 ////////////////////////////////////////////////////////////////
 
-type MosesCallT struct {
+type CallT struct {
 	XMLName    xml.Name  `xml:"methodCall"`
 	MethodName string    `xml:"methodName"`
 	Params     []MemberT `xml:"params>param>value>struct>member"`
 }
 
-type MosesResponseT struct {
+type ResponseT struct {
 	XMLName xml.Name  `xml:"methodResponse"`
-	Params  []MemberT `xml:"params>param>value>struct>member"`
-	Fault   []MemberT `xml:"fault>value>struct>member"`
+	Params  []MemberT `xml:"params>param>value>struct>member,omitempty"`
+	Fault   []MemberT `xml:"fault>value>struct>member,omitempty"`
 }
 
 type ValueT struct {
-	I4      *int     `xml:"i4,omitempty"`
-	Int     *int     `xml:"int,omitempty"`
-	Boolean *int     `xml:"boolean,omitempty"`
-	String  *string  `xml:"string,omitempty"`
-	Text    string   `xml:",chardata""`
-	Double  *float64 `xml:"double,omitempty"`
-	Struct  *StructT `xml:"struct,omitempty"`
-	Array   *ArrayT  `xml:"array,omitempty"`
-}
-
-type StructT struct {
-	Member []MemberT `xml:"member"`
+	I4        *int      `xml:"i4,omitempty"`
+	Int       *int      `xml:"int,omitempty"`
+	IntVal    string    `xml:"intval,omitempty"`
+	Boolean   int       `xml:"boolean,omitempty"`
+	BoolVal   string    `xml:"boolval,omitempty"`
+	String    string    `xml:"string,omitempty"`
+	Text      string    `xml:",chardata""`
+	Double    float64   `xml:"double,omitempty"`
+	DoubleVal string    `xml:"doubleval,omitempty"`
+	Struct    []MemberT `xml:"struct>member,omitempty"`
+	Array     []ValueT  `xml:"array>data>value,omitempty"`
 }
 
 type MemberT struct {
@@ -91,14 +91,10 @@ type MemberT struct {
 	Value ValueT `xml:"value"`
 }
 
-type ArrayT struct {
-	Data []ValueT `xml:"data>value"`
-}
-
 ////////////////////////////////////////////////////////////////
 
 type MosesT struct {
-	mt     *MosesResponseT
+	mt     *ResponseT
 	tok    string
 	err    string
 	errnum int
@@ -195,7 +191,8 @@ func main() {
 	}
 
 	http.HandleFunc("/", info)
-	http.HandleFunc("/rpc", handle)
+	http.HandleFunc("/rpc", handleJson)
+	http.HandleFunc("/rpcxml", handleXml)
 	http.HandleFunc("/favicon.ico", favicon)
 	http.HandleFunc("/robots.txt", robots)
 
@@ -203,14 +200,20 @@ func main() {
 	log.Print("Server exit: ", http.ListenAndServe(":9070", nil))
 }
 
-func handle(w http.ResponseWriter, r *http.Request) {
+func handleJson(w http.ResponseWriter, r *http.Request) {
+	handle(w, r, false)
+}
+
+func handleXml(w http.ResponseWriter, r *http.Request) {
+	handle(w, r, true)
+}
+
+func handle(w http.ResponseWriter, r *http.Request, xmlrpc bool) {
 
 	if len(chQueue) >= QUEUESIZE {
 		http.Error(w, "Too many requests", http.StatusServiceUnavailable)
 		return
 	}
-	chQueue <- true
-	defer func() { <-chQueue }()
 
 	start1 := time.Now()
 
@@ -229,39 +232,97 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		Detokenize:    true,
 	}
 
-	switch r.Method {
-	case "GET":
-		r.ParseForm()
-		req.Action = first(r, "action")
-		req.SourceLang = first(r, "sourceLang")
-		req.TargetLang = first(r, "targetLang")
-		req.Text = first(r, "text")
-		if first(r, "alignmentInfo") == "true" {
-			req.AlignmentInfo = true
-		}
-		if first(r, "detokenize") == "false" {
-			req.Detokenize = false
-		}
-		if n, err := strconv.Atoi(first(r, "nBestSize")); err == nil {
-			req.NBestSize = n
-		}
-	case "POST":
+	if xmlrpc {
+
+		w.Header().Set("Content-Type", "txt/xml")
+
 		b, _ := ioutil.ReadAll(r.Body)
 		r.Body.Close()
-		err := json.Unmarshal(b, req)
+
+		call := &CallT{}
+		err := xml.Unmarshal(b, call)
 		if err != nil {
-			rerror(w, 5, "Parse error: "+err.Error())
+			rerror(w, xmlrpc, 5, "Parse error: "+err.Error())
 			return
 		}
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+
+		switch call.MethodName {
+		case "alive_check":
+			fmt.Fprint(w, `<?xml version='1.0'?>
+<methodResponse>
+<params>
+<param>
+<value><int>1</int></value>
+</param>
+</params>
+</methodResponse>
+`)
+			return
+		case "process_task":
+		default:
+			rerror(w, xmlrpc, 5, "Method \""+call.MethodName+"\" is not supported")
+			return
+		}
+
+		for _, p := range call.Params {
+			switch p.Name {
+			case "action":
+				req.Action = xmlString(p)
+			case "sourceLang":
+				req.SourceLang = xmlString(p)
+			case "targetLang":
+				req.TargetLang = xmlString(p)
+			case "alignmentInfo":
+				req.AlignmentInfo = xmlBool(p)
+			case "text":
+				req.Text = xmlString(p)
+			case "nBestSize":
+				req.NBestSize = xmlInt(p)
+			case "detokenize":
+				req.Detokenize = xmlBool(p)
+			}
+		}
+
+	} else {
+
+		switch r.Method {
+		case "GET":
+			w.Header().Set("Content-Type", "application/json")
+			r.ParseForm()
+			req.Action = first(r, "action")
+			req.SourceLang = first(r, "sourceLang")
+			req.TargetLang = first(r, "targetLang")
+			req.Text = first(r, "text")
+			if first(r, "alignmentInfo") == "true" {
+				req.AlignmentInfo = true
+			}
+			if first(r, "detokenize") == "false" {
+				req.Detokenize = false
+			}
+			if n, err := strconv.Atoi(first(r, "nBestSize")); err == nil {
+				req.NBestSize = n
+			}
+		case "POST":
+			w.Header().Set("Content-Type", "application/json")
+			b, _ := ioutil.ReadAll(r.Body)
+			r.Body.Close()
+			err := json.Unmarshal(b, req)
+			if err != nil {
+				rerror(w, xmlrpc, 5, "Parse error: "+err.Error())
+				return
+			}
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	chQueue <- true
+	defer func() { <-chQueue }()
 
 	if req.Action != "translate" {
-		rerror(w, 5, "value of 'action' should be 'translate")
+		rerror(w, xmlrpc, 5, "value of 'action' should be 'translate")
 		return
 	}
 
@@ -276,7 +337,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 			<-chPoolNL
 		}()
 	} else {
-		rerror(w, 3, "Invalid combination of SourceLang + TargetLang")
+		rerror(w, xmlrpc, 3, "Invalid combination of SourceLang + TargetLang")
 		return
 	}
 
@@ -304,14 +365,14 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		if req.SourceLang == "nl" {
 			ss, err = tokenize.Dutch(part, run)
 			if err != nil {
-				rerror(w, 8, "Tokenizer: "+err.Error())
+				rerror(w, xmlrpc, 8, "Tokenizer: "+err.Error())
 				return
 			}
 			ss = strings.TrimSpace(ss)
 		} else {
 			ss, err = doCmd("echo %s | %s -l en", quote(part), TOKENIZER)
 			if err != nil {
-				rerror(w, 8, "Tokenizer: "+err.Error())
+				rerror(w, xmlrpc, 8, "Tokenizer: "+err.Error())
 				return
 			}
 			ss = html.UnescapeString(ss)
@@ -368,7 +429,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	responses := make([]*MosesT, 0)
 	for _, line := range lines {
 		rs := &MosesT{
-			mt:  &MosesResponseT{},
+			mt:  &ResponseT{},
 			tok: line,
 		}
 		if n := len(strings.Fields(line)); n > 100 {
@@ -387,13 +448,13 @@ func handle(w http.ResponseWriter, r *http.Request) {
 				if err := xml.Unmarshal(resp, rs.mt); err != nil {
 					panic(err)
 				}
-				if len(rs.mt.Fault) > 0 {
+				if rs.mt.Fault != nil {
 					rs.err = "unknown"
 					rs.errnum = 8
 					for _, member := range rs.mt.Fault {
 						if member.Name == "faultString" {
-							if member.Value.String != nil {
-								rs.err = *member.Value.String
+							if member.Value.String != "" {
+								rs.err = member.Value.String
 							} else {
 								rs.err = member.Value.Text
 							}
@@ -423,12 +484,118 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	time2 := time.Now().Sub(start2)
 	js.TimeWait = time1.String()
 	js.TimeWork = time2.String()
-	b, _ := json.MarshalIndent(js, "", "  ")
-	s := string(b)
-
-	fmt.Fprintf(w, s+"\n")
 
 	log.Printf("Requests: %d - Wait: %v - Work: %v - Lines: %d", len(chQueue), time1, time2, len(lines))
+
+	if xmlrpc {
+		fmt.Fprintln(w, "<?xml version='1.0' encoding='UTF-8'?>\n<methodResponse><params><param><value>")
+		marshall(reflect.ValueOf(*js), w)
+		fmt.Fprintln(w, "</value></param></params></methodResponse>")
+	} else {
+		b, _ := json.MarshalIndent(js, "", "  ")
+		fmt.Fprintln(w, string(b))
+	}
+}
+
+func marshall(r reflect.Value, w http.ResponseWriter) {
+	switch k := r.Kind(); k {
+	case reflect.Struct:
+		fmt.Fprintln(w, "<struct>")
+		t := r.Type()
+		for i := 0; i < r.NumField(); i++ {
+			f := t.Field(i)
+			tag := f.Tag.Get("json")
+			s := strings.Split(tag, ",")
+			var n string
+			omitempty := false
+			if len(s) > 0 {
+				n = s[0]
+				for _, opt := range s[1:] {
+					if opt == "omitempty" {
+						omitempty = true
+					}
+				}
+			} else {
+				n = f.Name
+			}
+			r2 := r.Field(i)
+			if omitempty && isempty(r2) {
+				continue
+			}
+			fmt.Fprintln(w, "<member>")
+			fmt.Fprintf(w, "<name>%s</name>\n", html.EscapeString(n))
+			fmt.Fprintln(w, "<value>")
+			marshall(r2, w)
+			fmt.Fprintln(w, "</value>")
+			fmt.Fprintln(w, "</member>")
+		}
+		fmt.Fprintln(w, "</struct>")
+	case reflect.Int:
+		fmt.Fprintf(w, "<int>%d</int>\n", r.Int())
+	case reflect.Float64:
+		fmt.Fprintf(w, "<double>%g</double>\n", r.Float())
+	case reflect.String:
+		fmt.Fprintf(w, "<string>%s</string>\n", r.String())
+	case reflect.Slice:
+		fmt.Fprintln(w, "<array><data>")
+		for i := 0; i < r.Len(); i++ {
+			fmt.Fprintln(w, "<value>")
+			marshall(r.Index(i), w)
+			fmt.Fprintln(w, "</value>")
+		}
+		fmt.Fprintln(w, "</data></array>")
+	default:
+		panic(fmt.Errorf("unknown type: %s", k))
+	}
+}
+
+func isempty(r reflect.Value) bool {
+	switch k := r.Kind(); k {
+	case reflect.Struct:
+		t := r.Type()
+		for i := 0; i < r.NumField(); i++ {
+			s := strings.Split(t.Field(i).Tag.Get("json"), ",")
+			omitempty := false
+			if len(s) > 0 {
+				for _, opt := range s[1:] {
+					if opt == "omitempty" {
+						omitempty = true
+					}
+				}
+			}
+			if !omitempty {
+				return false
+			}
+			if !isempty(r.Field(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Int:
+		if r.Int() == 0 {
+			return true
+		}
+	case reflect.Float64:
+		if r.Float() == 0 {
+			return true
+		}
+	case reflect.String:
+		if r.String() == "" {
+			return true
+		}
+	case reflect.Bool:
+		return r.Bool()
+	case reflect.Slice:
+		for i := 0; i < r.Len(); i++ {
+			if !isempty(r.Index(i)) {
+				return false
+			}
+		}
+		return true
+	default:
+		panic(fmt.Errorf("unknown type: %s", k))
+	}
+	return false
 }
 
 func splitlines(ori, tok string) string {
@@ -509,7 +676,7 @@ func decodeMulti(responses []*MosesT, dodetok, doalign bool, tgtlang string) *Js
 		var nbest []ValueT
 		for _, member := range resp.mt.Params {
 			if member.Name == "nbest" {
-				nbest = member.Value.Array.Data
+				nbest = member.Value.Array
 			}
 		}
 
@@ -517,18 +684,18 @@ func decodeMulti(responses []*MosesT, dodetok, doalign bool, tgtlang string) *Js
 			tr := TranslatedT{
 				Rank: i,
 			}
-			for _, member := range translated.Struct.Member {
+			for _, member := range translated.Struct {
 				switch member.Name {
 				case "align":
 					tr.AlignmentRaw = make([]AlignmentRawT, 0)
-					for _, v := range member.Value.Array.Data {
+					for _, v := range member.Value.Array {
 						a := AlignmentRawT{
 							SrcStart: -1,
 							SrcEnd:   -1,
 							TgtStart: -1,
 							TgtEnd:   -1,
 						}
-						for _, member := range v.Struct.Member {
+						for _, member := range v.Struct {
 							var value int
 							if member.Value.I4 != nil {
 								value = *member.Value.I4
@@ -547,14 +714,14 @@ func decodeMulti(responses []*MosesT, dodetok, doalign bool, tgtlang string) *Js
 						tr.AlignmentRaw = append(tr.AlignmentRaw, a)
 					}
 				case "hyp":
-					tr.Tokenized = strings.TrimSpace(unescape(*member.Value.String))
+					tr.Tokenized = strings.TrimSpace(unescape(member.Value.String))
 					if dodetok {
 						tr.Text = untok(tr.Tokenized, tgtlang)
 					} else {
 						tr.Text = tr.Tokenized
 					}
 				case "totalScore":
-					tr.Score = *member.Value.Double
+					tr.Score = member.Value.Double
 				}
 			}
 			if !doalign {
@@ -573,12 +740,54 @@ func first(r *http.Request, opt string) string {
 	return ""
 }
 
-func rerror(w http.ResponseWriter, code int, msg string) {
-	fmt.Fprintf(w, `{
+func xmlString(p MemberT) string {
+	if p.Value.String != "" {
+		return p.Value.String
+	}
+	return p.Value.Text
+}
+
+func xmlBool(p MemberT) bool {
+	return p.Value.Boolean != 0
+}
+
+func xmlInt(p MemberT) int {
+	if p.Value.Int != nil {
+		return *p.Value.Int
+	}
+	if p.Value.I4 != nil {
+		return *p.Value.I4
+	}
+	return 0
+}
+
+func rerror(w http.ResponseWriter, xmlrpc bool, code int, msg string) {
+	if xmlrpc {
+		fmt.Fprintf(w, `<?xml version='1.0' encoding='UTF-8'?>
+<methodResponse>
+  <fault>
+    <value>
+      <struct>
+        <member>
+          <name>faultCode</name>
+          <value><int>%d</int></value>
+        </member>
+        <member>
+          <name>faultString</name>
+          <value><string>%s</string></value>
+        </member>
+      </struct>
+    </value>
+  </fault>
+</methodResponse>
+`, code, html.EscapeString(msg))
+	} else {
+		fmt.Fprintf(w, `{
     "errorCode": %d,
     "errorMessage": %q
 }
 `, code, msg)
+	}
 }
 
 func quote(s string) string {
@@ -715,15 +924,13 @@ func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([
 		port = "9072"
 	}
 
-	True := 1
-
-	r := &MosesCallT{
+	r := &CallT{
 		MethodName: "translate",
 		Params: []MemberT{
 			MemberT{
 				Name: "text",
 				Value: ValueT{
-					String: &tokenized,
+					String: tokenized,
 				},
 			},
 			MemberT{
@@ -735,7 +942,7 @@ func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([
 			MemberT{
 				Name: "nbest-distinct",
 				Value: ValueT{
-					Boolean: &True,
+					BoolVal: "1",
 				},
 			},
 		},
@@ -746,16 +953,17 @@ func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([
 			MemberT{
 				Name: "align",
 				Value: ValueT{
-					Boolean: &True,
+					BoolVal: "1",
 				},
 			})
 	}
 
 	m, _ := xml.MarshalIndent(r, "", "  ")
+	s := fixxml(string(m))
 
 	var buf bytes.Buffer
-	buf.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-	buf.Write(m)
+	buf.WriteString("<?xml version='1.0' encoding='UTF-8'?>\n")
+	buf.WriteString(s)
 
 	resp, err := http.Post("http://127.0.0.1:"+port+"/RPC2", "text/xml", &buf)
 
@@ -767,6 +975,25 @@ func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([
 	resp.Body.Close()
 
 	return b, nil
+}
+
+var (
+	reEmpty  = regexp.MustCompile(` *<[a-zA-Z]+>\s*</[a-zA-Z]+> *\n?`)
+	reInt    = regexp.MustCompile(`<intval>(-?[0-9]+)</intval>`)
+	reBool   = regexp.MustCompile(`<boolval>([0-9]+)</boolval>`)
+	reDouble = regexp.MustCompile(`<doubleval>(.*?)</doubleval>`)
+)
+
+func fixxml(s string) string {
+	s1 := ""
+	for s != s1 {
+		s1 = s
+		s = reEmpty.ReplaceAllString(s, "")
+	}
+	s = reInt.ReplaceAllString(s, "<int>$1</int>")
+	s = reBool.ReplaceAllString(s, "<boolean>$1</boolean>")
+	s = reDouble.ReplaceAllString(s, "<double>$1</double>")
+	return s
 }
 
 func escape(s string) string {
@@ -810,6 +1037,29 @@ or:
     <a href="http://zardoz.service.rug.nl:9070/rpc?action=translate&amp;sourceLang=nl&amp;targetLang=en&amp;text=Dit+is+een+test.+En+dit+is+ook+een+test.&amp;detokenize=true&amp;alignmentInfo=true&amp;nBestSize=3">http://zardoz.service.rug.nl:9070/rpc?action=translate&amp;sourceLang=nl&amp;targetLang=en&amp;text=Dit+is+een+test.+En+dit+is+ook+een+test.&amp;detokenize=true&amp;alignmentInfo=true&amp;nBestSize=3</a>
 </pre>
 <p>
+or:
+<pre>
+    curl -d '&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+    &lt;methodCall&gt;
+      &lt;methodName&gt;process_task&lt;/methodName&gt;
+      &lt;params&gt;&lt;param&gt;&lt;value&gt;&lt;struct&gt;
+        &lt;member&gt;&lt;name&gt;action&lt;/name&gt;&lt;value&gt;&lt;string&gt;translate&lt;/string&gt;&lt;/value&gt;&lt;/member&gt;
+        &lt;member&gt;&lt;name&gt;sourceLang&lt;/name&gt;&lt;value&gt;&lt;string&gt;nl&lt;/string&gt;&lt;/value&gt;&lt;/member&gt;
+        &lt;member&gt;&lt;name&gt;targetLang&lt;/name&gt;&lt;value&gt;&lt;string&gt;en&lt;/string&gt;&lt;/value&gt;&lt;/member&gt;
+        &lt;member&gt;&lt;name&gt;text&lt;/name&gt;&lt;value&gt;&lt;string&gt;Dit is een test. En dit is ook een test.&lt;/string&gt;&lt;/value&gt;&lt;/member&gt;
+        &lt;member&gt;&lt;name&gt;alignmentInfo&lt;/name&gt;&lt;value&gt;&lt;boolean&gt;1&lt;/boolean&gt;&lt;/value&gt;&lt;/member&gt;
+        &lt;member&gt;&lt;name&gt;nBestSize&lt;/name&gt;&lt;value&gt;&lt;i4&gt;3&lt;/i4&gt;&lt;/value&gt;&lt;/member&gt;
+      &lt;/struct&gt;&lt;/value&gt;&lt;/param&gt;&lt;/params&gt;
+    &lt;/methodCall&gt;' http://zardoz.service.rug.nl:9070/rpcxml
+</pre>
+<p>
+Alive?
+<pre>
+    curl -d '&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+    &lt;methodCall&gt;
+      &lt;methodName&gt;alive_check&lt;/methodName&gt;
+    &lt;/methodCall&gt;' http://zardoz.service.rug.nl:9070/rpcxml
+</pre>
 See: <a href="https://github.com/ufal/mtmonkey/blob/master/API.md">API</a>
 <p>
 Sources: <a href="https://github.com/rug-compling/qtleap/tree/master/moses">github</a>
