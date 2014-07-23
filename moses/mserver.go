@@ -192,7 +192,7 @@ func main() {
 
 	http.HandleFunc("/", info)
 	http.HandleFunc("/rpc", handleJson)
-	http.HandleFunc("/rpcxml", handleXml)
+	http.HandleFunc("/xmlrpc", handleXml)
 	http.HandleFunc("/favicon.ico", favicon)
 	http.HandleFunc("/robots.txt", robots)
 
@@ -1050,7 +1050,7 @@ or:
         &lt;member&gt;&lt;name&gt;alignmentInfo&lt;/name&gt;&lt;value&gt;&lt;boolean&gt;1&lt;/boolean&gt;&lt;/value&gt;&lt;/member&gt;
         &lt;member&gt;&lt;name&gt;nBestSize&lt;/name&gt;&lt;value&gt;&lt;i4&gt;3&lt;/i4&gt;&lt;/value&gt;&lt;/member&gt;
       &lt;/struct&gt;&lt;/value&gt;&lt;/param&gt;&lt;/params&gt;
-    &lt;/methodCall&gt;' http://zardoz.service.rug.nl:9070/rpcxml
+    &lt;/methodCall&gt;' http://zardoz.service.rug.nl:9070/xmlrpc
 </pre>
 <p>
 Alive?
@@ -1058,7 +1058,7 @@ Alive?
     curl -d '&lt;?xml version="1.0" encoding="UTF-8"?&gt;
     &lt;methodCall&gt;
       &lt;methodName&gt;alive_check&lt;/methodName&gt;
-    &lt;/methodCall&gt;' http://zardoz.service.rug.nl:9070/rpcxml
+    &lt;/methodCall&gt;' http://zardoz.service.rug.nl:9070/xmlrpc
 </pre>
 See: <a href="https://github.com/ufal/mtmonkey/blob/master/API.md">API</a>
 <p>
