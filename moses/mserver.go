@@ -404,7 +404,7 @@ func handle(w http.ResponseWriter, r *http.Request, xmlrpc bool) {
 					}
 					switch sentence_start {
 					case false:
-						if rePunct.MatchString(word) {
+						if word == ":" || rePunct.MatchString(word) {
 							sentence_start = true
 						}
 					case true:
@@ -828,7 +828,9 @@ func untrue(s, lang string) string {
 		switch state {
 		case 0: // normal
 			outwords[i] = word
-			if word == "." || word == "!" || word == "?" {
+			if rePunct.MatchString(word) {
+				state = 1
+			} else if word == ":" && i < len(inwords)-1 && strings.Contains(`"”„“`, inwords[i+1]) {
 				state = 1
 			}
 		case 1: // need cap
