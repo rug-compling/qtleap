@@ -217,7 +217,7 @@ func handle(w http.ResponseWriter, r *http.Request, xmlrpc bool) {
 
 	start1 := time.Now()
 
-	log.Printf("[%s] %s %s", r.Header.Get("X-Forwarded-For"), r.RemoteAddr, r.Method)
+	log.Printf("[%s] %s %s %s", r.Header.Get("X-Forwarded-For"), r.RemoteAddr, r.Method, r.URL.Path)
 
 	var chClose <-chan bool
 	if f, ok := w.(http.CloseNotifier); ok {
