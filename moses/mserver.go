@@ -13,7 +13,7 @@ package main
 //=========
 
 import (
-	"github.com/pebbe/tokenize"
+	"github.com/pebbe/tokenize" // For Dutch
 
 	"bufio"
 	"bytes"
@@ -44,10 +44,12 @@ import (
 
 const (
 	// Configuration
+	cfgPortEnNl      = "9071"
+	cfgPortNlEn      = "9072"
 	cfgSH            = "/bin/sh"
 	cfgPATH          = "/bin:/usr/bin:/net/aps/64/bin"
 	cfgTRUECASEMODEL = "corpus/data/truecase-model"
-	cfgTOKENIZER     = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/tokenizer.perl"
+	cfgTOKENIZER     = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/tokenizer.perl" // For English
 	cfgLOGFILE       = "mserver.log"
 	cfgPOOLSIZE      = 12   // Identical to number of threads in each of the two mosesservers
 	cfgQUEUESIZE     = 1000 // Including request currently being processed
@@ -105,7 +107,7 @@ type ValueT struct {
 	Int     *int      `xml:"int,omitempty"`
 	Boolean int       `xml:"boolean,omitempty"`
 	String  string    `xml:"string,omitempty"`
-	Text    string    `xml:",chardata""`
+	Text    string    `xml:",chardata"`
 	Double  float64   `xml:"double,omitempty"`
 	Struct  []MemberT `xml:"struct>member,omitempty"`
 	Array   []ValueT  `xml:"array>data>value,omitempty"`
@@ -229,8 +231,8 @@ func main() {
 	//
 
 	http.HandleFunc("/", info)
-	http.HandleFunc("/rpc", handleJson)
-	http.HandleFunc("/xmlrpc", handleXml)
+	http.HandleFunc("/rpc", handleJSON)
+	http.HandleFunc("/xmlrpc", handleXML)
 	http.HandleFunc("/favicon.ico", favicon)
 	http.HandleFunc("/robots.txt", robots)
 
@@ -244,7 +246,7 @@ func main() {
 //. Handlers for RPC
 //==================
 
-func handleJson(w http.ResponseWriter, r *http.Request) {
+func handleJSON(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/rpc" {
 		http.NotFound(w, r)
 		return
@@ -252,7 +254,7 @@ func handleJson(w http.ResponseWriter, r *http.Request) {
 	handle(w, r, false)
 }
 
-func handleXml(w http.ResponseWriter, r *http.Request) {
+func handleXML(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/xmlrpc" {
 		http.NotFound(w, r)
 		return
@@ -490,10 +492,10 @@ func handle(w http.ResponseWriter, r *http.Request, isXmlrpc bool) {
 
 				// Truecase
 				words := strings.Fields(s)
-				sentence_start := true
+				sentenceStart := true
 				for i, word := range words {
 					lcword := strings.ToLower(word)
-					if w, ok := best[req.SourceLang][lcword]; sentence_start && ok {
+					if w, ok := best[req.SourceLang][lcword]; sentenceStart && ok {
 						// Truecase sentence start
 						words[i] = w
 					} else if known[req.SourceLang][word] {
@@ -502,14 +504,14 @@ func handle(w http.ResponseWriter, r *http.Request, isXmlrpc bool) {
 						// Truecase otherwise unknown words
 						words[i] = w
 					}
-					switch sentence_start {
+					switch sentenceStart {
 					case false:
 						if word == ":" || rePunct.MatchString(word) {
-							sentence_start = true
+							sentenceStart = true
 						}
 					case true:
 						if reLetNum.MatchString(word) && word != "'s" && word != "'t" {
-							sentence_start = false
+							sentenceStart = false
 						}
 					}
 				}
@@ -683,7 +685,7 @@ func handle(w http.ResponseWriter, r *http.Request, isXmlrpc bool) {
 
 	if isXmlrpc {
 		fmt.Fprintln(w, "<?xml version='1.0' encoding='UTF-8'?>\n<methodResponse>")
-		xmlRpcParamsMarshal(*reply, w)
+		xmlRPCParamsMarshal(*reply, w)
 		fmt.Fprintln(w, "</methodResponse>")
 	} else { // JSON
 		b, _ := json.MarshalIndent(reply, "", "  ")
@@ -846,9 +848,9 @@ func unescape(s string) string {
 //=========================
 
 func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([]byte, error) {
-	port := "9071"
+	port := cfgPortEnNl
 	if sourceLang == "nl" {
-		port = "9072"
+		port = cfgPortNlEn
 	}
 
 	var buf bytes.Buffer
@@ -862,7 +864,7 @@ func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([
 <methodCall>
   <methodName>translate</methodName>
 `)
-	xmlRpcParamsMarshal(js, &buf)
+	xmlRPCParamsMarshal(js, &buf)
 	buf.WriteString("</methodCall>\n")
 
 	resp, err := http.Post("http://127.0.0.1:"+port+"/RPC2", "text/xml", &buf)
@@ -912,10 +914,10 @@ func doCmd(format string, a ...interface{}) (string, error) {
 //. Converting JSON to XML-RPC
 //============================
 
-func xmlRpcParamsMarshal(i interface{}, w io.Writer) {
+func xmlRPCParamsMarshal(i interface{}, w io.Writer) {
 	r := reflect.ValueOf(i)
 	if r.Kind() == reflect.Ptr {
-		panic("Can't call xmlRpcParamsMarshal with pointer variable")
+		panic("Can't call xmlRPCParamsMarshal with pointer variable")
 	}
 
 	fmt.Fprint(w, `  <params>
