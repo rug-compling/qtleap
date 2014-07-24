@@ -86,7 +86,7 @@ func untok(s, lang string) string {
 				continue
 			}
 		}
-		if lang == "en" && word[0] == '\'' {
+		if lang == "en" && strings.Contains("’'", word[:1]) {
 			words[i] = "\a" + word
 			continue
 		}
