@@ -244,13 +244,6 @@ func main() {
 //. Handlers for RPC
 //==================
 
-func serverLog(handler http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		logf("[%s] %s %s %s", r.Header.Get("X-Forwarded-For"), r.RemoteAddr, r.Method, r.URL.Path)
-		handler.ServeHTTP(w, r)
-	})
-}
-
 func handleJson(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/rpc" {
 		http.NotFound(w, r)
@@ -1075,6 +1068,13 @@ func xmlrpcGetInt(p MemberT) int {
 //. Helpers for HTTP handlers
 //===========================
 
+func serverLog(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logf("[%s] %s %s %s", r.Header.Get("X-Forwarded-For"), r.RemoteAddr, r.Method, r.URL.Path)
+		handler.ServeHTTP(w, r)
+	})
+}
+
 func getGetOption(r *http.Request, opt string) string {
 	if len(r.Form[opt]) > 0 {
 		return strings.TrimSpace(r.Form[opt][0])
@@ -1120,6 +1120,10 @@ func init() {
 	file__favicon__ico = string(b)
 }
 
+func cache(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+}
+
 var file__favicon__ico = `
 AAABAAEAEBAAAAEACABoBQAAFgAAACgAAAAQAAAAIAAAAAEACAAAAAAAAAEAAAAAAAAAAAAAAAEAAAAA
 AAD19fwA7OzkANLSywD5+fkA39/gAOrq6gD3+PQAqab/APf39wDt7O0A09PJAO/v7QDV1dQA4uH0AOjo
@@ -1156,10 +1160,6 @@ func robots(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	cache(w)
 	fmt.Fprint(w, "User-agent: *\nDisallow: /\n")
-}
-
-func cache(w http.ResponseWriter) {
-	w.Header().Set("Cache-Control", "public, max-age=86400")
 }
 
 func info(w http.ResponseWriter, r *http.Request) {
