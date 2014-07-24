@@ -1,5 +1,5 @@
 
-all: mserver
+% : %.go
+	go build $<
 
-mserver: mserver.go
-	go build mserver.go
+all: mserver untokenize
