@@ -37,9 +37,9 @@ case "`ps -p $(< pid.txt)`" in
     *mserver*)
 	;;
     *)
-        # TODO: logrotate
+	cat mserver.out
 	echo Starting mserver
-	./mserver > mserver.log 2>&1 &
+	./mserver > mserver.out 2>&1 &
 	echo $! > pid.txt
 	;;
 esac

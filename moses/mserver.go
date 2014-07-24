@@ -1,16 +1,16 @@
+package main
+
 /*
 
- Moses is getraind met deze escapes:
+  Moses was trained with these escapes:
 
     & -> &amp;
     | -> &#124;
 
-
- TODO: rotate log
-
 */
 
-package main
+//. Imports
+//=========
 
 import (
 	"github.com/pebbe/tokenize"
@@ -22,6 +22,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"html"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -32,19 +33,31 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
 )
 
+//. Constants
+//===========
+
 const (
-	SH            = "/bin/sh"
-	PATH          = "/bin:/usr/bin:/net/aps/64/bin"
-	TRUECASEMODEL = "corpus/data/truecase-model"
-	TOKENIZER     = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/tokenizer.perl"
-	POOLSIZE      = 12   // gelijk aan aantal threads in elk van de twee mosesservers
-	QUEUESIZE     = 1000 // inclusief request die nu verwerkt worden
+	// Configuration
+	cfgSH            = "/bin/sh"
+	cfgPATH          = "/bin:/usr/bin:/net/aps/64/bin"
+	cfgTRUECASEMODEL = "corpus/data/truecase-model"
+	cfgTOKENIZER     = "/net/aps/64/opt/moses/mosesdecoder/scripts/tokenizer/tokenizer.perl"
+	cfgLOGFILE       = "mserver.log"
+	cfgPOOLSIZE      = 12   // Identical to number of threads in each of the two mosesservers
+	cfgQUEUESIZE     = 1000 // Including request currently being processed
+
+	// For the logger
+	logEXIT = "***EXIT***"
 )
+
+//. Global variables
+//==================
 
 var (
 	rePar      = regexp.MustCompile("\n\\s*\n")
@@ -54,36 +67,32 @@ var (
 	reLet      = regexp.MustCompile(`\pL`)
 	reLetNum   = regexp.MustCompile(`\pL|\pN`)
 
+	// For the truecaser
 	best  = make(map[string]map[string]string)
 	known = make(map[string]map[string]bool)
+
+	// For the logger
+	chLog = make(chan string)
+
+	// For the RPC handler
+	chPoolNL = make(chan bool, cfgPOOLSIZE)
+	chPoolEN = make(chan bool, cfgPOOLSIZE)
+	chQueue  = make(chan bool, cfgQUEUESIZE*2) // Plenty of room for simultaneous requests
 )
 
-////////////////////////////////////////////////////////////////
+//. Types for XML-RPC
+//===================
 
-type CallT struct {
+type MethodCallT struct {
 	XMLName    xml.Name  `xml:"methodCall"`
 	MethodName string    `xml:"methodName"`
 	Params     []MemberT `xml:"params>param>value>struct>member"`
 }
 
-type ResponseT struct {
+type MethodResponseT struct {
 	XMLName xml.Name  `xml:"methodResponse"`
 	Params  []MemberT `xml:"params>param>value>struct>member,omitempty"`
 	Fault   []MemberT `xml:"fault>value>struct>member,omitempty"`
-}
-
-type ValueT struct {
-	I4        *int      `xml:"i4,omitempty"`
-	Int       *int      `xml:"int,omitempty"`
-	IntVal    string    `xml:"intval,omitempty"`
-	Boolean   int       `xml:"boolean,omitempty"`
-	BoolVal   string    `xml:"boolval,omitempty"`
-	String    string    `xml:"string,omitempty"`
-	Text      string    `xml:",chardata""`
-	Double    float64   `xml:"double,omitempty"`
-	DoubleVal string    `xml:"doubleval,omitempty"`
-	Struct    []MemberT `xml:"struct>member,omitempty"`
-	Array     []ValueT  `xml:"array>data>value,omitempty"`
 }
 
 type MemberT struct {
@@ -91,18 +100,29 @@ type MemberT struct {
 	Value ValueT `xml:"value"`
 }
 
-////////////////////////////////////////////////////////////////
+type ValueT struct {
+	I4      *int      `xml:"i4,omitempty"`
+	Int     *int      `xml:"int,omitempty"`
+	Boolean int       `xml:"boolean,omitempty"`
+	String  string    `xml:"string,omitempty"`
+	Text    string    `xml:",chardata""`
+	Double  float64   `xml:"double,omitempty"`
+	Struct  []MemberT `xml:"struct>member,omitempty"`
+	Array   []ValueT  `xml:"array>data>value,omitempty"`
+}
 
+// Wrapper to store a response from mosesserver
 type MosesT struct {
-	mt     *ResponseT
+	mt     *MethodResponseT
 	tok    string
 	err    string
 	errnum int
 }
 
-////////////////////////////////////////////////////////////////
+//. Types for output in JSON format
+//=================================
 
-type Json struct {
+type OutputT struct {
 	ErrorCode    int            `json:"errorCode"`
 	ErrorMessage string         `json:"errorMessage"`
 	TimeWait     string         `json:"timeWait"`
@@ -113,7 +133,6 @@ type Json struct {
 type TranslationT struct {
 	ErrorCode    int           `json:"errorCode,omitempty"`
 	ErrorMessage string        `json:"errorMessage,omitempty"`
-	Src          string        `json:"src,omitempty"`
 	SrcTokenized string        `json:"src-tokenized,omitempty"`
 	Translated   []TranslatedT `json:"translated,omitempty"`
 }
@@ -133,9 +152,21 @@ type AlignmentRawT struct {
 	TgtEnd   int `json:"tgt-end"`
 }
 
-////////////////////////////////////////////////////////////////
+//. Type for call to mosesserver
+//==============================
 
-type Request struct {
+type MosesParamsT struct {
+	// This is in 'json' format, for later conversion to XML-RPC format
+	Text          string `json:"text"`
+	NBest         int    `json:"nbest"`
+	NBestDistinct bool   `json:"nbest-distinct"`
+	Align         bool   `json:"align,omitempty"`
+}
+
+//. Type for user request
+//=======================
+
+type RequestT struct {
 	Action        string `json:"action"`
 	SourceLang    string `json:"sourceLang"`
 	TargetLang    string `json:"targetLang"`
@@ -145,29 +176,32 @@ type Request struct {
 	Text          string `json:"text"`
 }
 
-////////////////////////////////////////////////////////////////
-
-type Result struct {
-	resp   []byte
-	err    error
-	srcTok string
-}
-
-////////////////////////////////////////////////////////////////
-
-var (
-	chPoolNL = make(chan bool, POOLSIZE)
-	chPoolEN = make(chan bool, POOLSIZE)
-	chQueue  = make(chan bool, QUEUESIZE*2)
-)
+//. Main
+//======
 
 func main() {
+
 	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	//
+	// Start the logger
+	//
+
+	var wgLogger sync.WaitGroup
+	wgLogger.Add(1)
+	go func() {
+		logger()
+		wgLogger.Done()
+	}()
+
+	//
+	// Load data for the truecaser
+	//
 
 	for _, lang := range []string{"nl", "en"} {
 		best[lang] = make(map[string]string)
 		known[lang] = make(map[string]bool)
-		fp, err := os.Open(TRUECASEMODEL + "." + lang)
+		fp, err := os.Open(cfgTRUECASEMODEL + "." + lang)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -190,34 +224,67 @@ func main() {
 		fp.Close()
 	}
 
+	//
+	// Set-up handlers and start serving
+	//
+
 	http.HandleFunc("/", info)
 	http.HandleFunc("/rpc", handleJson)
 	http.HandleFunc("/xmlrpc", handleXml)
 	http.HandleFunc("/favicon.ico", favicon)
 	http.HandleFunc("/robots.txt", robots)
 
-	log.Print("Server starting")
-	log.Print("Server exit: ", http.ListenAndServe(":9070", nil))
+	logf("Server starting")
+	logf("Server exit: %v", http.ListenAndServe(":9070", serverLog(http.DefaultServeMux)))
+	chLog <- logEXIT
+	wgLogger.Wait()
+
+}
+
+//. Handlers for RPC
+//==================
+
+func serverLog(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logf("[%s] %s %s %s", r.Header.Get("X-Forwarded-For"), r.RemoteAddr, r.Method, r.URL.Path)
+		handler.ServeHTTP(w, r)
+	})
 }
 
 func handleJson(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/rpc" {
+		http.NotFound(w, r)
+		return
+	}
 	handle(w, r, false)
 }
 
 func handleXml(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/xmlrpc" {
+		http.NotFound(w, r)
+		return
+	}
 	handle(w, r, true)
 }
 
-func handle(w http.ResponseWriter, r *http.Request, xmlrpc bool) {
+func handle(w http.ResponseWriter, r *http.Request, isXmlrpc bool) {
 
-	if len(chQueue) >= QUEUESIZE {
+	//
+	// Check if we can handle this request
+	//
+
+	if len(chQueue) >= cfgQUEUESIZE {
+		logf("Too many request")
 		http.Error(w, "Too many requests", http.StatusServiceUnavailable)
 		return
 	}
-
 	start1 := time.Now()
+	chQueue <- true
+	defer func() { <-chQueue }()
 
-	log.Printf("[%s] %s %s %s", r.Header.Get("X-Forwarded-For"), r.RemoteAddr, r.Method, r.URL.Path)
+	//
+	// Catch loss of connection
+	//
 
 	var chClose <-chan bool
 	if f, ok := w.(http.CloseNotifier); ok {
@@ -226,80 +293,89 @@ func handle(w http.ResponseWriter, r *http.Request, xmlrpc bool) {
 		chClose = make(<-chan bool)
 	}
 
-	req := &Request{
+	//
+	// Parse request
+	//
+
+	req := &RequestT{
 		AlignmentInfo: false,
 		NBestSize:     1,
 		Detokenize:    true,
 	}
+	if isXmlrpc {
 
-	if xmlrpc {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
 		w.Header().Set("Content-Type", "txt/xml")
 
 		b, _ := ioutil.ReadAll(r.Body)
 		r.Body.Close()
 
-		call := &CallT{}
+		call := &MethodCallT{}
 		err := xml.Unmarshal(b, call)
 		if err != nil {
-			rerror(w, xmlrpc, 5, "Parse error: "+err.Error())
+			responseError(w, isXmlrpc, 5, "Parse error: "+err.Error())
 			return
 		}
 
+		logf("Method: %v", call.MethodName)
 		switch call.MethodName {
 		case "alive_check":
 			fmt.Fprint(w, `<?xml version='1.0'?>
 <methodResponse>
-<params>
-<param>
-<value><int>1</int></value>
-</param>
-</params>
+  <params>
+    <param>
+      <value><int>1</int></value>
+    </param>
+  </params>
 </methodResponse>
 `)
 			return
 		case "process_task":
 		default:
-			rerror(w, xmlrpc, 5, "Method \""+call.MethodName+"\" is not supported")
+			responseError(w, isXmlrpc, 5, "Method \""+call.MethodName+"\" is not supported")
 			return
 		}
 
 		for _, p := range call.Params {
 			switch p.Name {
 			case "action":
-				req.Action = xmlString(p)
+				req.Action = xmlrpcGetString(p)
 			case "sourceLang":
-				req.SourceLang = xmlString(p)
+				req.SourceLang = xmlrpcGetString(p)
 			case "targetLang":
-				req.TargetLang = xmlString(p)
+				req.TargetLang = xmlrpcGetString(p)
 			case "alignmentInfo":
-				req.AlignmentInfo = xmlBool(p)
+				req.AlignmentInfo = xmlrpcGetBool(p)
 			case "text":
-				req.Text = xmlString(p)
+				req.Text = xmlrpcGetString(p)
 			case "nBestSize":
-				req.NBestSize = xmlInt(p)
+				req.NBestSize = xmlrpcGetInt(p)
 			case "detokenize":
-				req.Detokenize = xmlBool(p)
+				req.Detokenize = xmlrpcGetBool(p)
 			}
 		}
 
-	} else {
+	} else { // JSON
 
 		switch r.Method {
 		case "GET":
 			w.Header().Set("Content-Type", "application/json")
 			r.ParseForm()
-			req.Action = first(r, "action")
-			req.SourceLang = first(r, "sourceLang")
-			req.TargetLang = first(r, "targetLang")
-			req.Text = first(r, "text")
-			if first(r, "alignmentInfo") == "true" {
+			req.Action = getGetOption(r, "action")
+			req.SourceLang = getGetOption(r, "sourceLang")
+			req.TargetLang = getGetOption(r, "targetLang")
+			req.Text = getGetOption(r, "text")
+			if getGetOption(r, "alignmentInfo") == "true" {
 				req.AlignmentInfo = true
 			}
-			if first(r, "detokenize") == "false" {
+			if getGetOption(r, "detokenize") == "false" {
 				req.Detokenize = false
 			}
-			if n, err := strconv.Atoi(first(r, "nBestSize")); err == nil {
+			if n, err := strconv.Atoi(getGetOption(r, "nBestSize")); err == nil {
 				req.NBestSize = n
 			}
 		case "POST":
@@ -308,7 +384,7 @@ func handle(w http.ResponseWriter, r *http.Request, xmlrpc bool) {
 			r.Body.Close()
 			err := json.Unmarshal(b, req)
 			if err != nil {
-				rerror(w, xmlrpc, 5, "Parse error: "+err.Error())
+				responseError(w, isXmlrpc, 5, "Parse error: "+err.Error())
 				return
 			}
 		default:
@@ -318,12 +394,19 @@ func handle(w http.ResponseWriter, r *http.Request, xmlrpc bool) {
 
 	}
 
-	chQueue <- true
-	defer func() { <-chQueue }()
+	//
+	// Check if options are valid, and if so, add request to pool
+	//
 
 	if req.Action != "translate" {
-		rerror(w, xmlrpc, 5, "value of 'action' should be 'translate")
+		responseError(w, isXmlrpc, 5, "value of 'action' should be 'translate")
 		return
+	}
+
+	if req.NBestSize < 1 {
+		req.NBestSize = 1
+	} else if req.NBestSize > 10 {
+		req.NBestSize = 10
 	}
 
 	if req.SourceLang == "en" && req.TargetLang == "nl" {
@@ -337,69 +420,93 @@ func handle(w http.ResponseWriter, r *http.Request, xmlrpc bool) {
 			<-chPoolNL
 		}()
 	} else {
-		rerror(w, xmlrpc, 3, "Invalid combination of SourceLang + TargetLang")
+		responseError(w, isXmlrpc, 3, "Invalid combination of SourceLang + TargetLang")
 		return
 	}
+
+	//
+	// Write to pool has completed, so now we can start processing
+	//
 
 	start2 := time.Now()
 	time1 := start2.Sub(start1)
 
+	//
+	// Don't do anything if we lost the connection
+	//
+
 	select {
 	case <-chClose:
-		log.Print("Request dropped")
+		logf("Request dropped")
 		return
 	default:
 	}
 
+	//
+	// Split text into paragraphs, then paragraphs into sentences.
+	// Tokenize and truecase sentences, and collect them into 'lines'.
+	//
+
 	parts := strings.Split(rePar.ReplaceAllLiteralString(req.Text, "\n\n"), "\n\n")
 	lines := make([]string, 0)
 	for _, part := range parts {
+
 		part = strings.TrimSpace(part)
-		run := isRun(strings.Split(part, "\n"))
-		if run {
+
+		// Does this paragraph contain one sentence per line, or running text?
+
+		isRun := isRunningText(part)
+		if isRun {
+			// If running text, change newlines to spaces
 			part = strings.Replace(part, "\n", " ", -1)
 		}
+
+		// Tokenize and split into sentences.
 
 		var ss string
 		var err error
 		if req.SourceLang == "nl" {
-			ss, err = tokenize.Dutch(part, run)
+			// Dutch tokenizer also splits input into sentences if last argument is true
+			ss, err = tokenize.Dutch(part, isRun)
 			if err != nil {
-				rerror(w, xmlrpc, 8, "Tokenizer: "+err.Error())
+				responseError(w, isXmlrpc, 8, "Tokenizer: "+err.Error())
 				return
 			}
 			ss = strings.TrimSpace(ss)
 		} else {
-			ss, err = doCmd("echo %s | %s -l en", quote(part), TOKENIZER)
+			ss, err = doCmd("echo %s | %s -l en", shellQuote(part), cfgTOKENIZER)
 			if err != nil {
-				rerror(w, xmlrpc, 8, "Tokenizer: "+err.Error())
+				responseError(w, isXmlrpc, 8, "Tokenizer: "+err.Error())
 				return
 			}
 			ss = html.UnescapeString(ss)
-			if run {
-				ss = splitlines(part, ss)
+			if isRun {
+				ss = splitSentences(part, ss)
 			}
 		}
 
-		// here we escape '&' and '|' because those were the escapes in the training data
+		// At this point we escape '&' and '|' because those were the escapes in the training data
+
 		ss = escape(ss)
+
+		// Truecase each line, and append to 'lines'
 
 		for _, s := range strings.Split(ss, "\n") {
 			s = strings.TrimSpace(s)
 			if s != "" {
 
-				// truecase
+				// Truecase
 				words := strings.Fields(s)
 				sentence_start := true
 				for i, word := range words {
 					lcword := strings.ToLower(word)
 					if w, ok := best[req.SourceLang][lcword]; sentence_start && ok {
-						// truecase sentence start
+						// Truecase sentence start
 						words[i] = w
 					} else if known[req.SourceLang][word] {
-						// don't change known words
+						// Don't change known words
 					} else if w, ok := best[req.SourceLang][lcword]; ok {
-						// truecase otherwise unknown words
+						// Truecase otherwise unknown words
 						words[i] = w
 					}
 					switch sentence_start {
@@ -420,16 +527,14 @@ func handle(w http.ResponseWriter, r *http.Request, xmlrpc bool) {
 		}
 	}
 
-	if req.NBestSize < 1 {
-		req.NBestSize = 1
-	} else if req.NBestSize > 10 {
-		req.NBestSize = 10
-	}
+	//
+	// Send each tokenized and truecased sentence to mosesserver, and collect the results in 'responses'
+	//
 
-	responses := make([]*MosesT, 0)
-	for _, line := range lines {
+	responses := make([]*MosesT, len(lines))
+	for idx, line := range lines {
 		rs := &MosesT{
-			mt:  &ResponseT{},
+			mt:  &MethodResponseT{},
 			tok: line,
 		}
 		if n := len(strings.Fields(line)); n > 100 {
@@ -441,14 +546,14 @@ func handle(w http.ResponseWriter, r *http.Request, xmlrpc bool) {
 		} else {
 			resp, err := doMoses(req.SourceLang, line, req.AlignmentInfo, req.NBestSize)
 			if err != nil {
-				log.Print("Moses: ", err)
+				logf("Moses: %v", err)
 				rs.err = err.Error()
 				rs.errnum = 8
 			} else {
 				if err := xml.Unmarshal(resp, rs.mt); err != nil {
 					panic(err)
 				}
-				if rs.mt.Fault != nil {
+				if len(rs.mt.Fault) > 0 {
 					rs.err = "unknown"
 					rs.errnum = 8
 					for _, member := range rs.mt.Fault {
@@ -463,214 +568,35 @@ func handle(w http.ResponseWriter, r *http.Request, xmlrpc bool) {
 				}
 			}
 		}
-		responses = append(responses, rs)
+		responses[idx] = rs
 	}
 
-	js := decodeMulti(responses, req.Detokenize, req.AlignmentInfo, req.TargetLang)
+	//
+	// Convert list of moses responses, and store into 'reply'
+	//
 
-	if req.AlignmentInfo {
-		for _, t := range js.Translation {
-			for _, tt := range t.Translated {
-				if n := len(tt.AlignmentRaw); n > 0 {
-					for i := 0; i < n-1; i++ {
-						tt.AlignmentRaw[i].TgtEnd = tt.AlignmentRaw[i+1].TgtStart - 1
-					}
-					tt.AlignmentRaw[n-1].TgtEnd = len(strings.Fields(tt.Tokenized)) - 1
-				}
-			}
-		}
-	}
-
-	time2 := time.Now().Sub(start2)
-	js.TimeWait = time1.String()
-	js.TimeWork = time2.String()
-
-	log.Printf("Requests: %d - Wait: %v - Work: %v - Lines: %d", len(chQueue), time1, time2, len(lines))
-
-	if xmlrpc {
-		fmt.Fprintln(w, "<?xml version='1.0' encoding='UTF-8'?>\n<methodResponse><params><param><value>")
-		marshall(reflect.ValueOf(*js), w)
-		fmt.Fprintln(w, "</value></param></params></methodResponse>")
-	} else {
-		b, _ := json.MarshalIndent(js, "", "  ")
-		fmt.Fprintln(w, string(b))
-	}
-}
-
-func marshall(r reflect.Value, w http.ResponseWriter) {
-	switch k := r.Kind(); k {
-	case reflect.Struct:
-		fmt.Fprintln(w, "<struct>")
-		t := r.Type()
-		for i := 0; i < r.NumField(); i++ {
-			f := t.Field(i)
-			tag := f.Tag.Get("json")
-			s := strings.Split(tag, ",")
-			var n string
-			omitempty := false
-			if len(s) > 0 {
-				n = s[0]
-				for _, opt := range s[1:] {
-					if opt == "omitempty" {
-						omitempty = true
-					}
-				}
-			} else {
-				n = f.Name
-			}
-			r2 := r.Field(i)
-			if omitempty && isempty(r2) {
-				continue
-			}
-			fmt.Fprintln(w, "<member>")
-			fmt.Fprintf(w, "<name>%s</name>\n", html.EscapeString(n))
-			fmt.Fprintln(w, "<value>")
-			marshall(r2, w)
-			fmt.Fprintln(w, "</value>")
-			fmt.Fprintln(w, "</member>")
-		}
-		fmt.Fprintln(w, "</struct>")
-	case reflect.Int:
-		fmt.Fprintf(w, "<int>%d</int>\n", r.Int())
-	case reflect.Float64:
-		fmt.Fprintf(w, "<double>%g</double>\n", r.Float())
-	case reflect.String:
-		fmt.Fprintf(w, "<string>%s</string>\n", r.String())
-	case reflect.Slice:
-		fmt.Fprintln(w, "<array><data>")
-		for i := 0; i < r.Len(); i++ {
-			fmt.Fprintln(w, "<value>")
-			marshall(r.Index(i), w)
-			fmt.Fprintln(w, "</value>")
-		}
-		fmt.Fprintln(w, "</data></array>")
-	default:
-		panic(fmt.Errorf("unknown type: %s", k))
-	}
-}
-
-func isempty(r reflect.Value) bool {
-	switch k := r.Kind(); k {
-	case reflect.Struct:
-		t := r.Type()
-		for i := 0; i < r.NumField(); i++ {
-			s := strings.Split(t.Field(i).Tag.Get("json"), ",")
-			omitempty := false
-			if len(s) > 0 {
-				for _, opt := range s[1:] {
-					if opt == "omitempty" {
-						omitempty = true
-					}
-				}
-			}
-			if !omitempty {
-				return false
-			}
-			if !isempty(r.Field(i)) {
-				return false
-			}
-		}
-		return true
-	case reflect.Int:
-		if r.Int() == 0 {
-			return true
-		}
-	case reflect.Float64:
-		if r.Float() == 0 {
-			return true
-		}
-	case reflect.String:
-		if r.String() == "" {
-			return true
-		}
-	case reflect.Bool:
-		return r.Bool()
-	case reflect.Slice:
-		for i := 0; i < r.Len(); i++ {
-			if !isempty(r.Index(i)) {
-				return false
-			}
-		}
-		return true
-	default:
-		panic(fmt.Errorf("unknown type: %s", k))
-	}
-	return false
-}
-
-func splitlines(ori, tok string) string {
-	tt := strings.Fields(tok)
-	out := make([]string, len(tt))
-	for i, t := range tt {
-		ori = strings.TrimSpace(ori)
-		if len(ori) > len(t) && ori[len(t)] == ' ' && rePunct.MatchString(t) {
-			out[i] = t + "\n"
-		} else {
-			out[i] = t + " "
-		}
-		if n := len(t); len(ori) > n {
-			ori = ori[n:]
-		}
-	}
-	return strings.TrimSpace(strings.Join(out, ""))
-}
-
-func isRun(lines []string) bool {
-	ln := float64(len(lines))
-	if ln < 2 {
-		return true
-	}
-	midpoint := float64(0)
-	endletter := float64(0)
-	for _, line := range lines {
-		if !reEndPoint.MatchString(line) {
-			endletter += 1
-		}
-		midpoint += float64(len(reMidPoint.FindAllString(line, -1)))
-	}
-	if endletter > ln*.3 || midpoint > ln*.3 {
-		return true
-	}
-	return false
-}
-
-func decodeMulti(responses []*MosesT, dodetok, doalign bool, tgtlang string) *Json {
-
-	repl := &Json{
+	reply := &OutputT{
 		Translation:  make([]TranslationT, len(responses)),
 		ErrorCode:    0,
 		ErrorMessage: "OK",
 	}
-
-	/*
-		var srclang string
-		if tgtlang == "nl" {
-			srclang = "en"
-		} else {
-			srclang = "nl"
-		}
-	*/
-
 	for idx, resp := range responses {
 
 		if resp.errnum != 0 || resp.err != "" {
-			repl.ErrorCode = 99
-			repl.ErrorMessage = "Failed to translate some sentence(s)"
-			repl.Translation[idx].ErrorCode = resp.errnum
-			repl.Translation[idx].ErrorMessage = resp.err
+			reply.ErrorCode = 99
+			reply.ErrorMessage = "Failed to translate some sentence(s)"
+			reply.Translation[idx].ErrorCode = resp.errnum
+			reply.Translation[idx].ErrorMessage = resp.err
 			if resp.errnum == 0 {
-				repl.Translation[idx].ErrorCode = 99
+				reply.Translation[idx].ErrorCode = 99
 			}
 			continue
 		}
 
-		repl.Translation[idx].Translated = make([]TranslatedT, 0)
+		reply.Translation[idx].Translated = make([]TranslatedT, 0)
 
-		if doalign || len(responses) > 1 {
-			repl.Translation[idx].SrcTokenized = strings.TrimSpace(unescape(resp.tok))
-		}
-		if len(responses) > 1 {
-			// repl.Translation[idx].Src = untok(repl.Translation[idx].SrcTokenized, srclang)
+		if req.AlignmentInfo || len(responses) > 1 {
+			reply.Translation[idx].SrcTokenized = strings.TrimSpace(unescape(resp.tok))
 		}
 
 		var nbest []ValueT
@@ -715,8 +641,8 @@ func decodeMulti(responses []*MosesT, dodetok, doalign bool, tgtlang string) *Js
 					}
 				case "hyp":
 					tr.Tokenized = strings.TrimSpace(unescape(member.Value.String))
-					if dodetok {
-						tr.Text = untok(tr.Tokenized, tgtlang)
+					if req.Detokenize {
+						tr.Text = untok(untrue(tr.Tokenized, req.TargetLang), req.TargetLang)
 					} else {
 						tr.Text = tr.Tokenized
 					}
@@ -724,116 +650,111 @@ func decodeMulti(responses []*MosesT, dodetok, doalign bool, tgtlang string) *Js
 					tr.Score = member.Value.Double
 				}
 			}
-			if !doalign {
+			if !req.AlignmentInfo {
 				tr.Tokenized = ""
 			}
-			repl.Translation[idx].Translated = append(repl.Translation[idx].Translated, tr)
+			reply.Translation[idx].Translated = append(reply.Translation[idx].Translated, tr)
 		}
 	}
-	return repl
-}
 
-func first(r *http.Request, opt string) string {
-	if len(r.Form[opt]) > 0 {
-		return strings.TrimSpace(r.Form[opt][0])
+	//
+	// Calculate the alignment values for tgt-end
+	//
+
+	if req.AlignmentInfo {
+		for _, t := range reply.Translation {
+			for _, tt := range t.Translated {
+				if n := len(tt.AlignmentRaw); n > 0 {
+					for i := 0; i < n-1; i++ {
+						tt.AlignmentRaw[i].TgtEnd = tt.AlignmentRaw[i+1].TgtStart - 1
+					}
+					tt.AlignmentRaw[n-1].TgtEnd = len(strings.Fields(tt.Tokenized)) - 1
+				}
+			}
+		}
 	}
-	return ""
-}
 
-func xmlString(p MemberT) string {
-	if p.Value.String != "" {
-		return p.Value.String
-	}
-	return p.Value.Text
-}
+	//
+	// Done processing
+	//
 
-func xmlBool(p MemberT) bool {
-	return p.Value.Boolean != 0
-}
+	time2 := time.Now().Sub(start2)
+	reply.TimeWait = time1.String()
+	reply.TimeWork = time2.String()
 
-func xmlInt(p MemberT) int {
-	if p.Value.Int != nil {
-		return *p.Value.Int
-	}
-	if p.Value.I4 != nil {
-		return *p.Value.I4
-	}
-	return 0
-}
+	logf("Requests: %d - Wait: %v - Work: %v - Lines: %d", len(chQueue), time1, time2, len(lines))
 
-func rerror(w http.ResponseWriter, xmlrpc bool, code int, msg string) {
-	if xmlrpc {
-		fmt.Fprintf(w, `<?xml version='1.0' encoding='UTF-8'?>
-<methodResponse>
-  <fault>
-    <value>
-      <struct>
-        <member>
-          <name>faultCode</name>
-          <value><int>%d</int></value>
-        </member>
-        <member>
-          <name>faultString</name>
-          <value><string>%s</string></value>
-        </member>
-      </struct>
-    </value>
-  </fault>
-</methodResponse>
-`, code, html.EscapeString(msg))
-	} else {
-		fmt.Fprintf(w, `{
-    "errorCode": %d,
-    "errorMessage": %q
-}
-`, code, msg)
+	//
+	// Send result
+	//
+
+	if isXmlrpc {
+		fmt.Fprintln(w, "<?xml version='1.0' encoding='UTF-8'?>\n<methodResponse>")
+		xmlRpcParamsMarshal(*reply, w)
+		fmt.Fprintln(w, "</methodResponse>")
+	} else { // JSON
+		b, _ := json.MarshalIndent(reply, "", "  ")
+		fmt.Fprintln(w, string(b))
 	}
 }
 
-func quote(s string) string {
-	return "'" + strings.Replace(s, "'", "'\\''", -1) + "'"
+//. Analysing and converting text
+//===============================
+
+func splitSentences(ori, tok string) string {
+	tt := strings.Fields(tok)
+	out := make([]string, len(tt))
+	for i, t := range tt {
+		ori = strings.TrimSpace(ori)
+		if len(ori) > len(t) && ori[len(t)] == ' ' && rePunct.MatchString(t) {
+			out[i] = t + "\n"
+		} else {
+			out[i] = t + " "
+		}
+		if n := len(t); len(ori) > n {
+			ori = ori[n:]
+		}
+	}
+	return strings.TrimSpace(strings.Join(out, ""))
 }
 
-func doCmd(format string, a ...interface{}) (string, error) {
-	cmd := exec.Command(SH, "-c", fmt.Sprintf(format, a...))
-	cmd.Env = []string{
-		"PATH=" + PATH,
-		"LANG=en_US.utf8",
-		"LANGUAGE=en_US.utf8",
-		"LC_ALL=en_US.utf8",
+func isRunningText(part string) bool {
+
+	lines := strings.Split(part, "\n")
+
+	ln := float64(len(lines))
+	if ln < 2 {
+		return true
 	}
-	pipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", err
+	midpoint := float64(0)
+	endletter := float64(0)
+	for _, line := range lines {
+		if !reEndPoint.MatchString(line) {
+			endletter += 1
+		}
+		midpoint += float64(len(reMidPoint.FindAllString(line, -1)))
 	}
-	err = cmd.Start()
-	if err != nil {
-		return "", err
+	if endletter > ln*.3 || midpoint > ln*.3 {
+		return true
 	}
-	b, _ := ioutil.ReadAll(pipe)
-	pipe.Close()
-	err = cmd.Wait()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(b)), nil
+	return false
 }
 
 func untrue(s, lang string) string {
-	// invoer was 1 zin, maar kan vertaald zijn naar meerdere zinnen
+	// Input was a single sentence, but it could be translated into more than one sentence
 	inwords := strings.Fields(s)
 	outwords := make([]string, len(inwords))
-	state := 1 // need cap
+	state := 1 // Need cap
 	for i, word := range inwords {
 		switch state {
-		case 0: // normal
+		case 0: // Normal
 			outwords[i] = word
 			if rePunct.MatchString(word) {
 				state = 1
 			} else if word == ":" && i < len(inwords)-1 && strings.Contains(`"”„“`, inwords[i+1]) {
 				state = 1
 			}
-		case 1: // need cap
+		case 1: // Need cap
 			if lang == "nl" {
 				if word == "'s" || word == "'t" {
 					outwords[i] = word
@@ -846,7 +767,7 @@ func untrue(s, lang string) string {
 				}
 			}
 			var w string
-			for j, c := range word { // use range in case first char is multibyte
+			for j, c := range word { // Use range in case first char is multibyte
 				if j == 0 && unicode.IsLetter(c) {
 					w = string(unicode.ToUpper(c))
 					state = 0
@@ -866,7 +787,7 @@ func untrue(s, lang string) string {
 
 func untok(s, lang string) string {
 
-	words := strings.Fields(untrue(s, lang))
+	words := strings.Fields(s)
 	doubO := false
 	singO := false
 	for i, word := range words {
@@ -920,52 +841,36 @@ func untok(s, lang string) string {
 
 }
 
+func escape(s string) string {
+	return strings.Replace(strings.Replace(s, "&", "&amp;", -1), "|", "&#124;", -1)
+}
+
+func unescape(s string) string {
+	return strings.Replace(strings.Replace(s, "&#124;", "|", -1), "&amp;", "&", -1)
+}
+
+//. Calling the mosesserver
+//=========================
+
 func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([]byte, error) {
 	port := "9071"
 	if sourceLang == "nl" {
 		port = "9072"
 	}
 
-	r := &CallT{
-		MethodName: "translate",
-		Params: []MemberT{
-			MemberT{
-				Name: "text",
-				Value: ValueT{
-					String: tokenized,
-				},
-			},
-			MemberT{
-				Name: "nbest",
-				Value: ValueT{
-					I4: &nBestSize,
-				},
-			},
-			MemberT{
-				Name: "nbest-distinct",
-				Value: ValueT{
-					BoolVal: "1",
-				},
-			},
-		},
-	}
-
-	if alignmentInfo {
-		r.Params = append(r.Params,
-			MemberT{
-				Name: "align",
-				Value: ValueT{
-					BoolVal: "1",
-				},
-			})
-	}
-
-	m, _ := xml.MarshalIndent(r, "", "  ")
-	s := fixxml(string(m))
-
 	var buf bytes.Buffer
-	buf.WriteString("<?xml version='1.0' encoding='UTF-8'?>\n")
-	buf.WriteString(s)
+	js := MosesParamsT{
+		Text:          tokenized,
+		NBest:         nBestSize,
+		NBestDistinct: true,
+		Align:         alignmentInfo,
+	}
+	buf.WriteString(`<?xml version='1.0' encoding='UTF-8'?>
+<methodCall>
+  <methodName>translate</methodName>
+`)
+	xmlRpcParamsMarshal(js, &buf)
+	buf.WriteString("</methodCall>\n")
 
 	resp, err := http.Post("http://127.0.0.1:"+port+"/RPC2", "text/xml", &buf)
 
@@ -979,36 +884,289 @@ func doMoses(sourceLang, tokenized string, alignmentInfo bool, nBestSize int) ([
 	return b, nil
 }
 
-var (
-	reEmpty  = regexp.MustCompile(` *<[a-zA-Z]+>\s*</[a-zA-Z]+> *\n?`)
-	reInt    = regexp.MustCompile(`<intval>(-?[0-9]+)</intval>`)
-	reBool   = regexp.MustCompile(`<boolval>([0-9]+)</boolval>`)
-	reDouble = regexp.MustCompile(`<doubleval>(.*?)</doubleval>`)
-)
+//. Shell commands
+//================
 
-func fixxml(s string) string {
-	s1 := ""
-	for s != s1 {
-		s1 = s
-		s = reEmpty.ReplaceAllString(s, "")
+func shellQuote(s string) string {
+	return "'" + strings.Replace(s, "'", "'\\''", -1) + "'"
+}
+
+func doCmd(format string, a ...interface{}) (string, error) {
+	cmd := exec.Command(cfgSH, "-c", fmt.Sprintf(format, a...))
+	cmd.Env = []string{
+		"PATH=" + cfgPATH,
+		"LANG=en_US.utf8",
+		"LANGUAGE=en_US.utf8",
+		"LC_ALL=en_US.utf8",
 	}
-	s = reInt.ReplaceAllString(s, "<int>$1</int>")
-	s = reBool.ReplaceAllString(s, "<boolean>$1</boolean>")
-	s = reDouble.ReplaceAllString(s, "<double>$1</double>")
-	return s
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	err = cmd.Start()
+	if err != nil {
+		return "", err
+	}
+	b, _ := ioutil.ReadAll(pipe)
+	pipe.Close()
+	err = cmd.Wait()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
 }
 
-func escape(s string) string {
-	return strings.Replace(strings.Replace(s, "&", "&amp;", -1), "|", "&#124;", -1)
+//. Converting JSON to XML-RPC
+//============================
+
+func xmlRpcParamsMarshal(i interface{}, w io.Writer) {
+	r := reflect.ValueOf(i)
+	if r.Kind() == reflect.Ptr {
+		panic("Can't call xmlRpcParamsMarshal with pointer variable")
+	}
+
+	fmt.Fprint(w, `  <params>
+    <param>
+      <value>
+`)
+
+	xmlrpcMarshal(r, "        ", w)
+
+	fmt.Fprint(w, `      </value>
+    </param>
+  </params>
+`)
+
 }
 
-func unescape(s string) string {
-	return strings.Replace(strings.Replace(s, "&#124;", "|", -1), "&amp;", "&", -1)
+func xmlrpcMarshal(r reflect.Value, indent string, w io.Writer) {
+	switch k := r.Kind(); k {
+	case reflect.Struct:
+		fmt.Fprintln(w, indent+"<struct>")
+		t := r.Type()
+		for i := 0; i < r.NumField(); i++ {
+			f := t.Field(i)
+			tag := f.Tag.Get("json")
+			s := strings.Split(tag, ",")
+			var n string
+			omitempty := false
+			if len(s) > 0 {
+				n = s[0]
+				for _, opt := range s[1:] {
+					if opt == "omitempty" {
+						omitempty = true
+					}
+				}
+			} else {
+				n = f.Name
+			}
+			r2 := r.Field(i)
+			if omitempty && xmlrpcIsempty(r2) {
+				continue
+			}
+			fmt.Fprintln(w, indent+"  <member>")
+			fmt.Fprintf(w, indent+"    <name>%s</name>\n", html.EscapeString(n))
+			fmt.Fprintln(w, indent+"    <value>")
+			xmlrpcMarshal(r2, indent+"      ", w)
+			fmt.Fprintln(w, indent+"    </value>")
+			fmt.Fprintln(w, indent+"  </member>")
+		}
+		fmt.Fprintln(w, indent+"</struct>")
+	case reflect.Bool:
+		v := 0
+		if r.Bool() {
+			v = 1
+		}
+		fmt.Fprintf(w, indent+"<boolean>%d</boolean>\n", v)
+	case reflect.Int:
+		fmt.Fprintf(w, indent+"<int>%d</int>\n", r.Int())
+	case reflect.Float64:
+		fmt.Fprintf(w, indent+"<double>%g</double>\n", r.Float())
+	case reflect.String:
+		fmt.Fprintf(w, indent+"<string>%s</string>\n", r.String())
+	case reflect.Slice:
+		fmt.Fprintln(w, indent+"<array>")
+		fmt.Fprintln(w, indent+"  <data>")
+		for i := 0; i < r.Len(); i++ {
+			fmt.Fprintln(w, indent+"    <value>")
+			xmlrpcMarshal(r.Index(i), indent+"      ", w)
+			fmt.Fprintln(w, indent+"    </value>")
+		}
+		fmt.Fprintln(w, indent+"  </data>")
+		fmt.Fprintln(w, indent+"</array>")
+	default:
+		panic(fmt.Errorf("unknown type: %s", k))
+	}
 }
 
-////////////////////////////////////////////////////////////////
+func xmlrpcIsempty(r reflect.Value) bool {
+	switch k := r.Kind(); k {
+	case reflect.Struct:
+		t := r.Type()
+		for i := 0; i < r.NumField(); i++ {
+			s := strings.Split(t.Field(i).Tag.Get("json"), ",")
+			omitempty := false
+			if len(s) > 0 {
+				for _, opt := range s[1:] {
+					if opt == "omitempty" {
+						omitempty = true
+					}
+				}
+			}
+			if !omitempty {
+				return false
+			}
+			if !xmlrpcIsempty(r.Field(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Bool:
+		return !r.Bool()
+	case reflect.Int:
+		if r.Int() == 0 {
+			return true
+		}
+	case reflect.Float64:
+		if r.Float() == 0 {
+			return true
+		}
+	case reflect.String:
+		if r.String() == "" {
+			return true
+		}
+	case reflect.Slice:
+		for i := 0; i < r.Len(); i++ {
+			if !xmlrpcIsempty(r.Index(i)) {
+				return false
+			}
+		}
+		return true
+	default:
+		panic(fmt.Errorf("unknown type: %s", k))
+	}
+	return false
+}
+
+//. Parsing XML-RPC
+//=================
+
+func xmlrpcGetString(p MemberT) string {
+	if p.Value.String != "" {
+		return p.Value.String
+	}
+	return p.Value.Text
+}
+
+func xmlrpcGetBool(p MemberT) bool {
+	return p.Value.Boolean != 0
+}
+
+func xmlrpcGetInt(p MemberT) int {
+	if p.Value.Int != nil {
+		return *p.Value.Int
+	}
+	if p.Value.I4 != nil {
+		return *p.Value.I4
+	}
+	return 0
+}
+
+//. Helpers for HTTP handlers
+//===========================
+
+func getGetOption(r *http.Request, opt string) string {
+	if len(r.Form[opt]) > 0 {
+		return strings.TrimSpace(r.Form[opt][0])
+	}
+	return ""
+}
+
+func responseError(w http.ResponseWriter, isXmlrpc bool, code int, msg string) {
+	if isXmlrpc {
+		fmt.Fprintf(w, `<?xml version='1.0' encoding='UTF-8'?>
+<methodResponse>
+  <fault>
+    <value>
+      <struct>
+        <member>
+          <name>faultCode</name>
+          <value><int>%d</int></value>
+        </member>
+        <member>
+          <name>faultString</name>
+          <value><string>%s</string></value>
+        </member>
+      </struct>
+    </value>
+  </fault>
+</methodResponse>
+`, code, html.EscapeString(msg))
+	} else {
+		fmt.Fprintf(w, `{
+    "errorCode": %d,
+    "errorMessage": %q
+}
+`, code, msg)
+	}
+}
+
+//. HTTP handlers for static pages
+//================================
+
+func init() {
+	var b []byte
+	b, _ = base64.StdEncoding.DecodeString(file__favicon__ico)
+	file__favicon__ico = string(b)
+}
+
+var file__favicon__ico = `
+AAABAAEAEBAAAAEACABoBQAAFgAAACgAAAAQAAAAIAAAAAEACAAAAAAAAAEAAAAAAAAAAAAAAAEAAAAA
+AAD19fwA7OzkANLSywD5+fkA39/gAOrq6gD3+PQAqab/APf39wDt7O0A09PJAO/v7QDV1dQA4uH0AOjo
+4ADb2ucAqKT9APX19QDm5uYAzMzNANfX1wDf3v0A5OP3AOno8QDX2MwAioX7AJaS9wDz8/MA09PKANnZ
+2gDk5OQA9fX+AOnp3gDm5u8A5eXZAM7OyADx8fEAu7j/AOnq5ADNzcMAn5v3ANrZ/ADPz84A+Pf5AJ6a
++gDf39IAzs7RAMjIwQDT08sA/v7+ANrZ2wDk5OUAwr/8AO/v7wDKyswA1dXWANzd2ADR0dEAp6T/AMvK
+xACLh/cA8fHyAMzMzwC/vfoA/Pz8AOnq5QDi4uMA0NDMANLR+wC2s/4A09H7ANTUyQD8/PQA7e3lAKKe
++AD8+/cA8O/wAPr6+gDa2tEAiIT4AOvr6wDIyMsAycjLAPj4+ADExMYAycnAANTUygCalvcA1tbVAJqV
++gDr6+wAkIz7APb29gDf3+UA3NzdAOfn5wDZ1/wAm5f9ANjY0AD09PQAxML/APLy8gCLh/oAzc7EAPz8
+/wDT0vsAj4v3ANDQzwD19PUA1NTMAP///wDb2twAysj/APDw8ADh4eEAqab9AIqF+AC2s/kAlZH3AP39
+/QD6+vUA7u7uAPn5+ADk5NkA0dDQAJiT+gDv7/wAy8n9AIqG9gD7+/sAmpb6APz7+wDs7OwA09PIAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAbm5ubjEDXHpjG4Fubm5ubm5uboEkeWVQcoQIcYNubm5uMVNlUxRDGC1DNyQkU25ubkBxElQw
+Jg0WQRxUQiQxbm5lcVEKAAcZZjp+VlIbTDFceR2FSyxKKRUoWStHMhJTbAVYASUabm5ubldFSQx5CFw1
+YiFPRG5ubm5pdBdOWhtcJAJdfUZubm5uYIIPbTOEXAk5IH88H25uaIA0DnwbAwM1XmdIc2o/dXYQXCdv
+EUBuG0w+LwZwYVtkeFUuAzVAbnc1eTYje18LIjsTJD1cbm5uTTVxBGs4OCpCZYRjbm5ubm53PTUbcR5c
+XHFNbm5ubm5ubm4xTRsbQHdubm5ubgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`
+
+func favicon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/x-icon")
+	cache(w)
+	fmt.Fprint(w, file__favicon__ico)
+}
+
+func robots(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	cache(w)
+	fmt.Fprint(w, "User-agent: *\nDisallow: /\n")
+}
+
+func cache(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+}
 
 func info(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	cache(w)
 	fmt.Fprint(w, `<!DOCTYPE html>
@@ -1068,59 +1226,51 @@ Sources: <a href="https://github.com/rug-compling/qtleap/tree/master/moses">gith
   </body>
 </html>
 `)
-
 }
 
-////////////////////////////////////////////////////////////////
+//. Logger
+//========
 
-var file__favicon__ico = `
-AAABAAEAEBAAAAEACABoBQAAFgAAACgAAAAQAAAAIAAAAAEACAAAAAAAAAEAAAAAAAAAAAAAAAEAAAAA
-AAD19fwA7OzkANLSywD5+fkA39/gAOrq6gD3+PQAqab/APf39wDt7O0A09PJAO/v7QDV1dQA4uH0AOjo
-4ADb2ucAqKT9APX19QDm5uYAzMzNANfX1wDf3v0A5OP3AOno8QDX2MwAioX7AJaS9wDz8/MA09PKANnZ
-2gDk5OQA9fX+AOnp3gDm5u8A5eXZAM7OyADx8fEAu7j/AOnq5ADNzcMAn5v3ANrZ/ADPz84A+Pf5AJ6a
-+gDf39IAzs7RAMjIwQDT08sA/v7+ANrZ2wDk5OUAwr/8AO/v7wDKyswA1dXWANzd2ADR0dEAp6T/AMvK
-xACLh/cA8fHyAMzMzwC/vfoA/Pz8AOnq5QDi4uMA0NDMANLR+wC2s/4A09H7ANTUyQD8/PQA7e3lAKKe
-+AD8+/cA8O/wAPr6+gDa2tEAiIT4AOvr6wDIyMsAycjLAPj4+ADExMYAycnAANTUygCalvcA1tbVAJqV
-+gDr6+wAkIz7APb29gDf3+UA3NzdAOfn5wDZ1/wAm5f9ANjY0AD09PQAxML/APLy8gCLh/oAzc7EAPz8
-/wDT0vsAj4v3ANDQzwD19PUA1NTMAP///wDb2twAysj/APDw8ADh4eEAqab9AIqF+AC2s/kAlZH3AP39
-/QD6+vUA7u7uAPn5+ADk5NkA0dDQAJiT+gDv7/wAy8n9AIqG9gD7+/sAmpb6APz7+wDs7OwA09PIAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAbm5ubjEDXHpjG4Fubm5ubm5uboEkeWVQcoQIcYNubm5uMVNlUxRDGC1DNyQkU25ubkBxElQw
-Jg0WQRxUQiQxbm5lcVEKAAcZZjp+VlIbTDFceR2FSyxKKRUoWStHMhJTbAVYASUabm5ubldFSQx5CFw1
-YiFPRG5ubm5pdBdOWhtcJAJdfUZubm5uYIIPbTOEXAk5IH88H25uaIA0DnwbAwM1XmdIc2o/dXYQXCdv
-EUBuG0w+LwZwYVtkeFUuAzVAbnc1eTYje18LIjsTJD1cbm5uTTVxBGs4OCpCZYRjbm5ubm53PTUbcR5c
-XHFNbm5ubm5ubm4xTRsbQHdubm5ubgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`
-
-func init() {
-	var b []byte
-	b, _ = base64.StdEncoding.DecodeString(file__favicon__ico)
-	file__favicon__ico = string(b)
+func logf(format string, v ...interface{}) {
+	chLog <- fmt.Sprintf(format, v...)
 }
 
-func favicon(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "image/x-icon")
-	cache(w)
-	fmt.Fprint(w, file__favicon__ico)
-}
+func logger() {
 
-////////////////////////////////////////////////////////////////
+	rotate := func() {
+		for i := 4; i > 1; i-- {
+			os.Rename(
+				fmt.Sprintf("%s%d", cfgLOGFILE, i-1),
+				fmt.Sprintf("%s%d", cfgLOGFILE, i))
+		}
+		os.Rename(cfgLOGFILE, cfgLOGFILE+"1")
+	}
 
-func robots(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-	cache(w)
-	fmt.Fprint(w, "User-agent: *\nDisallow: /\n")
-}
+	rotate()
+	fp, err := os.Create(cfgLOGFILE)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-////////////////////////////////////////////////////////////////
-
-func cache(w http.ResponseWriter) {
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	n := 0
+	for {
+		msg := <-chLog
+		if msg == logEXIT {
+			fp.Close()
+			return
+		}
+		now := time.Now()
+		s := fmt.Sprintf("%04d-%02d-%02d %d:%02d:%02d %s",
+			now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second(),
+			msg)
+		fmt.Fprintln(fp, s)
+		fp.Sync()
+		n++
+		if n == 10000 {
+			fp.Close()
+			rotate()
+			fp, _ = os.Create(cfgLOGFILE)
+			n = 0
+		}
+	}
 }
