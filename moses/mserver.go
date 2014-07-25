@@ -932,7 +932,9 @@ func xmlRPCParamsMarshal(i interface{}, w io.Writer) {
 func xmlrpcMarshal(r reflect.Value, indent string, w io.Writer) {
 	switch k := r.Kind(); k {
 	case reflect.Ptr:
-		xmlrpcMarshal(reflect.Indirect(r), indent, w)
+		if !r.IsNil() {
+			xmlrpcMarshal(reflect.Indirect(r), indent, w)
+		}
 	case reflect.String:
 		fmt.Fprintf(w, indent+"<string>%s</string>\n", html.EscapeString(r.String()))
 	case reflect.Int:
@@ -994,6 +996,9 @@ func xmlrpcMarshal(r reflect.Value, indent string, w io.Writer) {
 func xmlrpcIsempty(r reflect.Value) bool {
 	switch k := r.Kind(); k {
 	case reflect.Ptr:
+		if r.IsNil() {
+			return true
+		}
 		return xmlrpcIsempty(reflect.Indirect(r))
 	case reflect.String:
 		return r.String() == ""
@@ -1004,12 +1009,7 @@ func xmlrpcIsempty(r reflect.Value) bool {
 	case reflect.Bool:
 		return r.Bool() == false
 	case reflect.Slice:
-		for i := 0; i < r.Len(); i++ {
-			if !xmlrpcIsempty(r.Index(i)) {
-				return false
-			}
-		}
-		return true
+		return r.Len() == 0
 	case reflect.Struct:
 		t := r.Type()
 		for i := 0; i < r.NumField(); i++ {
