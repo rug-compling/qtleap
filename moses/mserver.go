@@ -685,7 +685,7 @@ func handle(w http.ResponseWriter, r *http.Request, isXmlrpc bool) {
 
 	if isXmlrpc {
 		fmt.Fprintln(w, "<?xml version='1.0' encoding='UTF-8'?>\n<methodResponse>")
-		xmlRPCParamsMarshal(*reply, w)
+		xmlRPCParamsMarshal(reply, w)
 		fmt.Fprintln(w, "</methodResponse>")
 	} else { // JSON
 		b, _ := json.MarshalIndent(reply, "", "  ")
@@ -915,17 +915,12 @@ func doCmd(format string, a ...interface{}) (string, error) {
 //============================
 
 func xmlRPCParamsMarshal(i interface{}, w io.Writer) {
-	r := reflect.ValueOf(i)
-	if r.Kind() == reflect.Ptr {
-		panic("Can't call xmlRPCParamsMarshal with pointer variable")
-	}
-
 	fmt.Fprint(w, `  <params>
     <param>
       <value>
 `)
 
-	xmlrpcMarshal(r, "        ", w)
+	xmlrpcMarshal(reflect.ValueOf(i), "        ", w)
 
 	fmt.Fprint(w, `      </value>
     </param>
@@ -936,6 +931,30 @@ func xmlRPCParamsMarshal(i interface{}, w io.Writer) {
 
 func xmlrpcMarshal(r reflect.Value, indent string, w io.Writer) {
 	switch k := r.Kind(); k {
+	case reflect.Ptr:
+		xmlrpcMarshal(reflect.Indirect(r), indent, w)
+	case reflect.String:
+		fmt.Fprintf(w, indent+"<string>%s</string>\n", html.EscapeString(r.String()))
+	case reflect.Int:
+		fmt.Fprintf(w, indent+"<int>%d</int>\n", r.Int())
+	case reflect.Float64:
+		fmt.Fprintf(w, indent+"<double>%g</double>\n", r.Float())
+	case reflect.Bool:
+		v := 0
+		if r.Bool() {
+			v = 1
+		}
+		fmt.Fprintf(w, indent+"<boolean>%d</boolean>\n", v)
+	case reflect.Slice:
+		fmt.Fprintln(w, indent+"<array>")
+		fmt.Fprintln(w, indent+"  <data>")
+		for i := 0; i < r.Len(); i++ {
+			fmt.Fprintln(w, indent+"    <value>")
+			xmlrpcMarshal(r.Index(i), indent+"      ", w)
+			fmt.Fprintln(w, indent+"    </value>")
+		}
+		fmt.Fprintln(w, indent+"  </data>")
+		fmt.Fprintln(w, indent+"</array>")
 	case reflect.Struct:
 		fmt.Fprintln(w, indent+"<struct>")
 		t := r.Type()
@@ -967,28 +986,6 @@ func xmlrpcMarshal(r reflect.Value, indent string, w io.Writer) {
 			fmt.Fprintln(w, indent+"  </member>")
 		}
 		fmt.Fprintln(w, indent+"</struct>")
-	case reflect.Bool:
-		v := 0
-		if r.Bool() {
-			v = 1
-		}
-		fmt.Fprintf(w, indent+"<boolean>%d</boolean>\n", v)
-	case reflect.Int:
-		fmt.Fprintf(w, indent+"<int>%d</int>\n", r.Int())
-	case reflect.Float64:
-		fmt.Fprintf(w, indent+"<double>%g</double>\n", r.Float())
-	case reflect.String:
-		fmt.Fprintf(w, indent+"<string>%s</string>\n", r.String())
-	case reflect.Slice:
-		fmt.Fprintln(w, indent+"<array>")
-		fmt.Fprintln(w, indent+"  <data>")
-		for i := 0; i < r.Len(); i++ {
-			fmt.Fprintln(w, indent+"    <value>")
-			xmlrpcMarshal(r.Index(i), indent+"      ", w)
-			fmt.Fprintln(w, indent+"    </value>")
-		}
-		fmt.Fprintln(w, indent+"  </data>")
-		fmt.Fprintln(w, indent+"</array>")
 	default:
 		panic(fmt.Errorf("unknown type: %s", k))
 	}
@@ -996,43 +993,37 @@ func xmlrpcMarshal(r reflect.Value, indent string, w io.Writer) {
 
 func xmlrpcIsempty(r reflect.Value) bool {
 	switch k := r.Kind(); k {
+	case reflect.Ptr:
+		return xmlrpcIsempty(reflect.Indirect(r))
+	case reflect.String:
+		return r.String() == ""
+	case reflect.Int:
+		return r.Int() == 0
+	case reflect.Float64:
+		return r.Float() == 0
+	case reflect.Bool:
+		return r.Bool() == false
+	case reflect.Slice:
+		for i := 0; i < r.Len(); i++ {
+			if !xmlrpcIsempty(r.Index(i)) {
+				return false
+			}
+		}
+		return true
 	case reflect.Struct:
 		t := r.Type()
 		for i := 0; i < r.NumField(); i++ {
 			s := strings.Split(t.Field(i).Tag.Get("json"), ",")
 			omitempty := false
-			if len(s) > 0 {
-				for _, opt := range s[1:] {
-					if opt == "omitempty" {
-						omitempty = true
-					}
+			for i, opt := range s {
+				if i > 0 && opt == "omitempty" {
+					omitempty = true
 				}
 			}
 			if !omitempty {
 				return false
 			}
 			if !xmlrpcIsempty(r.Field(i)) {
-				return false
-			}
-		}
-		return true
-	case reflect.Bool:
-		return !r.Bool()
-	case reflect.Int:
-		if r.Int() == 0 {
-			return true
-		}
-	case reflect.Float64:
-		if r.Float() == 0 {
-			return true
-		}
-	case reflect.String:
-		if r.String() == "" {
-			return true
-		}
-	case reflect.Slice:
-		for i := 0; i < r.Len(); i++ {
-			if !xmlrpcIsempty(r.Index(i)) {
 				return false
 			}
 		}
