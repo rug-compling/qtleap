@@ -12,14 +12,23 @@
 #    touch mserver.out
 #
 
-if [ "`hostname -s`" != "zardoz" ]
+servername=$(< /net/aps/64/servername)
+
+if [ "`hostname -s`" != "$servername" ]
 then
-    echo This must be run on zardoz
+    echo This must be run on $servername
     exit 1
 fi
 
 
 cd `dirname $0`
+
+ln -s lock.$$ lock
+if [ "`readlink lock`" != lock.$$ ]
+then
+    echo Getting lock failed
+    exit
+fi
 
 # This is 10% of memory (not counting swap)
 ulimit -v 52830340
@@ -61,3 +70,5 @@ case "`ps -p $(< pid.txt)`" in
 	echo $! > pid.txt
 	;;
 esac
+
+rm -f lock

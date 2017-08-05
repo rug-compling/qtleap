@@ -62,6 +62,8 @@ const (
 //==================
 
 var (
+	machine string
+
 	rePar      = regexp.MustCompile("\n\\s*\n")
 	rePunct    = regexp.MustCompile(`^[.!?]+$`)
 	reEndPoint = regexp.MustCompile(`\pL\pL\pP*[.!?]\s*$`)
@@ -182,6 +184,12 @@ type RequestT struct {
 //======
 
 func main() {
+
+	b, err := ioutil.ReadFile("/net/aps/64/server")
+	if err != nil {
+		log.Fatal(err)
+	}
+	machine = strings.TrimSpace(string(b))
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
