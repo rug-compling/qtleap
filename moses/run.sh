@@ -12,7 +12,7 @@
 #    touch mserver.out
 #
 
-servername=$(< /net/aps/64/servername)
+servername=$(< /net/aps/servername)
 
 if [ "`hostname -s`" != "$servername" ]
 then

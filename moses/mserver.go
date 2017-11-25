@@ -185,7 +185,7 @@ type RequestT struct {
 
 func main() {
 
-	b, err := ioutil.ReadFile("/net/aps/64/server")
+	b, err := ioutil.ReadFile("/net/aps/server")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -1190,12 +1190,12 @@ Examples:
         "detokenize":    true,
         "alignmentInfo": true,
         "nBestSize":     3
-    }' http://zardoz.service.rug.nl:9070/rpc
+    }' http://haytabo.let.rug.nl:9070/rpc
 </pre>
 <p>
 or:
 <pre>
-    <a href="http://zardoz.service.rug.nl:9070/rpc?action=translate&amp;sourceLang=nl&amp;targetLang=en&amp;text=Dit+is+een+test.+En+dit+is+ook+een+test.&amp;detokenize=true&amp;alignmentInfo=true&amp;nBestSize=3">http://zardoz.service.rug.nl:9070/rpc?action=translate&amp;sourceLang=nl&amp;targetLang=en&amp;text=Dit+is+een+test.+En+dit+is+ook+een+test.&amp;detokenize=true&amp;alignmentInfo=true&amp;nBestSize=3</a>
+    <a href="http://haytabo.let.rug.nl:9070/rpc?action=translate&amp;sourceLang=nl&amp;targetLang=en&amp;text=Dit+is+een+test.+En+dit+is+ook+een+test.&amp;detokenize=true&amp;alignmentInfo=true&amp;nBestSize=3">http://haytabo.let.rug.nl:9070/rpc?action=translate&amp;sourceLang=nl&amp;targetLang=en&amp;text=Dit+is+een+test.+En+dit+is+ook+een+test.&amp;detokenize=true&amp;alignmentInfo=true&amp;nBestSize=3</a>
 </pre>
 <p>
 or:
@@ -1211,7 +1211,7 @@ or:
         &lt;member&gt;&lt;name&gt;alignmentInfo&lt;/name&gt;&lt;value&gt;&lt;boolean&gt;1&lt;/boolean&gt;&lt;/value&gt;&lt;/member&gt;
         &lt;member&gt;&lt;name&gt;nBestSize&lt;/name&gt;&lt;value&gt;&lt;i4&gt;3&lt;/i4&gt;&lt;/value&gt;&lt;/member&gt;
       &lt;/struct&gt;&lt;/value&gt;&lt;/param&gt;&lt;/params&gt;
-    &lt;/methodCall&gt;' http://zardoz.service.rug.nl:9070/xmlrpc
+    &lt;/methodCall&gt;' http://haytabo.let.rug.nl:9070/xmlrpc
 </pre>
 <p>
 Alive?
@@ -1219,7 +1219,7 @@ Alive?
     curl -d '&lt;?xml version="1.0" encoding="UTF-8"?&gt;
     &lt;methodCall&gt;
       &lt;methodName&gt;alive_check&lt;/methodName&gt;
-    &lt;/methodCall&gt;' http://zardoz.service.rug.nl:9070/xmlrpc
+    &lt;/methodCall&gt;' http://haytabo.let.rug.nl:9070/xmlrpc
 </pre>
 See: <a href="https://github.com/ufal/mtmonkey/blob/master/API.md">API</a>
 <p>
